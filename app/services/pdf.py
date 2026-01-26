@@ -39,7 +39,15 @@ async def get_browser() -> Browser:
     global _browser
     
     async with _browser_lock:
-        if _browser is None or not _browser.is_connected():
+        # Always check if browser is still usable
+        if _browser is not None:
+            try:
+                if not _browser.is_connected():
+                    _browser = None
+            except:
+                _browser = None
+        
+        if _browser is None:
             logger.info("Starting Playwright browser")
             playwright = await async_playwright().start()
             _browser = await playwright.chromium.launch(
@@ -69,46 +77,24 @@ async def close_browser():
 async def render_pdf(
     html: str,
     options: Optional[PDFOptions] = None,
+    _retry: bool = True,
 ) -> bytes:
-    """
-    Render HTML to PDF.
-    
-    Args:
-        html: HTML content to render
-        options: PDF options (format, margins, etc.)
-    
-    Returns:
-        PDF as bytes
-    
-    This is the core function used by:
-    - Consumer: worker.py renders email HTML
-    - Developer API: /v1/convert/html endpoint
-    """
+    """Render HTML to PDF."""
     if options is None:
         options = PDFOptions()
     
-    browser = await get_browser()
-    context: Optional[BrowserContext] = None
-    
     try:
-        # Create isolated context for this render
+        browser = await get_browser()
         context = await browser.new_context(
             viewport={"width": 1280, "height": 720},
             device_scale_factor=2,
         )
         
-        # Set timeout
         context.set_default_timeout(settings.max_render_time_seconds * 1000)
-        
         page = await context.new_page()
-        
-        # Load HTML content
         await page.set_content(html, wait_until="networkidle")
-        
-        # Wait a bit for any lazy-loaded content
         await asyncio.sleep(0.5)
         
-        # Generate PDF
         pdf_bytes = await page.pdf(
             format=options.format,
             landscape=options.landscape,
@@ -122,20 +108,21 @@ async def render_pdf(
             scale=options.scale,
         )
         
+        await context.close()
         logger.info(f"PDF rendered: {len(pdf_bytes)} bytes")
         return pdf_bytes
         
-    except asyncio.TimeoutError:
-        logger.error("PDF render timeout")
-        raise RuntimeError("PDF rendering timed out")
-    
     except Exception as e:
+        # Browser crashed - reset and retry once
+        global _browser
+        _browser = None
+        
+        if _retry:
+            logger.warning(f"Browser error, retrying: {e}")
+            return await render_pdf(html, options, _retry=False)
+        
         logger.error(f"PDF render error: {e}")
         raise RuntimeError(f"PDF rendering failed: {e}")
-    
-    finally:
-        if context:
-            await context.close()
 
 
 async def render_url_to_pdf(

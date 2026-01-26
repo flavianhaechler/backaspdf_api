@@ -181,16 +181,18 @@ async def create_job(
     payload: dict,
 ) -> str:
     """Create a conversion job."""
+    import json
+    
     from_domain = from_email.split("@")[1] if "@" in from_email else ""
     async with get_conn() as conn:
         row = await conn.fetchrow(
             """
             INSERT INTO conversions 
             (message_id, from_email, from_domain, subject, email_payload, status, created_at)
-            VALUES ($1, $2, $3, $4, $5, 'queued', NOW())
+            VALUES ($1, $2, $3, $4, $5::jsonb, 'queued', NOW())
             RETURNING id
             """,
-            message_id, from_email.lower(), from_domain, subject, payload
+            message_id, from_email.lower(), from_domain, subject, json.dumps(payload)
         )
         return str(row["id"])
 

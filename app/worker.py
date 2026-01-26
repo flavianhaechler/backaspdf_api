@@ -51,9 +51,15 @@ async def process_job(job: dict) -> bool:
     
     Returns True if successful.
     """
+    import json
+    
     job_id = str(job["id"])
     from_email = job["from_email"]
     payload = job["email_payload"]
+    
+    # Parse JSON if stored as string
+    if isinstance(payload, str):
+        payload = json.loads(payload)
     
     logger.info(f"Processing job {job_id} from {from_email}")
     

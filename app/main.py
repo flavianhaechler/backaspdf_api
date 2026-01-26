@@ -107,24 +107,24 @@ async def resend_webhook(request: Request):
     
     Creates a job in the queue for the worker to process.
     """
-    # TODO: Verify webhook signature
-    # signature = request.headers.get("svix-signature", "")
-    
     try:
         payload = await request.json()
     except:
         raise HTTPException(400, "Invalid JSON")
     
+    # Resend wraps email in "data" field
+    data = payload.get("data", payload)
+    
     # Extract email data
-    from_email = payload.get("from", "")
+    from_email = data.get("from", "")
     if "<" in from_email:
         from_email = from_email.split("<")[1].split(">")[0]
     
-    message_id = payload.get("messageId", payload.get("message_id", ""))
-    subject = payload.get("subject", "")
+    message_id = data.get("messageId", data.get("message_id", ""))
+    subject = data.get("subject", "")
     
     if not from_email or not message_id:
-        logger.warning("Missing from_email or message_id in webhook")
+        logger.warning(f"Missing from_email or message_id in webhook. Payload keys: {payload.keys()}")
         raise HTTPException(400, "Missing required fields")
     
     # Deduplicate
@@ -137,7 +137,6 @@ async def resend_webhook(request: Request):
     
     if quota_result.action.value == "reject":
         logger.info(f"Quota exceeded for {from_email}: {quota_result.message}")
-        # Still create job but mark as rejected
         await db.create_job(
             message_id=message_id,
             from_email=from_email,
@@ -146,12 +145,12 @@ async def resend_webhook(request: Request):
         )
         return {"status": "rejected", "reason": quota_result.message}
     
-    # Create job
+    # Create job with full data
     job_id = await db.create_job(
         message_id=message_id,
         from_email=from_email,
         subject=subject,
-        payload=payload,
+        payload=data,  # Use data, not payload
     )
     
     logger.info(f"Job created: {job_id} for {from_email}")
@@ -159,7 +158,6 @@ async def resend_webhook(request: Request):
     return {
         "status": "queued",
         "job_id": job_id,
-        "warn": quota_result.action.value if "warn" in quota_result.action.value else None,
     }
 
 

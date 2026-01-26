@@ -4,6 +4,7 @@ Email parsing - extract HTML and metadata from inbound emails.
 import base64
 import logging
 import re
+import json
 from dataclasses import dataclass
 from typing import Optional
 from email.utils import parseaddr
@@ -26,21 +27,15 @@ class ParsedEmail:
 def parse_email(webhook_data: dict) -> ParsedEmail:
     """
     Parse Resend inbound webhook payload.
+    
+    Extracts HTML content, resolves inline images (CID),
+    and normalizes the email for PDF rendering.
     """
-    import logging
-    logger = logging.getLogger(__name__)
+    # DEBUG: Log full payload
+    logger.info(f"FULL PAYLOAD: {json.dumps(webhook_data, default=str)[:3000]}")
     
-    # DEBUG: Log everything
-    logger.info(f"Webhook keys: {webhook_data.keys()}")
-    logger.info(f"HTML length: {len(webhook_data.get('html', ''))}")
-    logger.info(f"Text length: {len(webhook_data.get('text', ''))}")
-    
-    attachments = webhook_data.get("attachments", [])
-    logger.info(f"Attachments count: {len(attachments)}")
-    for i, att in enumerate(attachments):
-        logger.info(f"Attachment {i}: filename={att.get('filename')}, content_type={att.get('content_type', att.get('contentType'))}, size={len(att.get('content', ''))}")
-    
-    # ... rest of function
+    # Extract basic fields
+    from_field = webhook_data.get("from", "")
     from_name, from_email = parseaddr(from_field)
     
     message_id = webhook_data.get("messageId", webhook_data.get("message_id", ""))
@@ -48,6 +43,8 @@ def parse_email(webhook_data: dict) -> ParsedEmail:
     html = webhook_data.get("html", "")
     text = webhook_data.get("text", "")
     attachments = webhook_data.get("attachments", [])
+    
+    logger.info(f"HTML length: {len(html)}, Text length: {len(text)}, Attachments: {len(attachments)}")
     
     # If no HTML, wrap text in basic HTML
     if not html and text:

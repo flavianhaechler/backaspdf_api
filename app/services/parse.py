@@ -30,8 +30,21 @@ def parse_email(webhook_data: dict) -> ParsedEmail:
     Extracts HTML content, resolves inline images (CID),
     and normalizes the email for PDF rendering.
     """
+def parse_email(webhook_data: dict) -> ParsedEmail:
+    """
+    Parse Resend inbound webhook payload.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    # DEBUG: Log what we receive
+    logger.info(f"Webhook keys: {webhook_data.keys()}")
+    logger.info(f"HTML length: {len(webhook_data.get('html', ''))}")
+    logger.info(f"Text length: {len(webhook_data.get('text', ''))}")
+    
     # Extract basic fields
     from_field = webhook_data.get("from", "")
+    # ... rest of function
     from_name, from_email = parseaddr(from_field)
     
     message_id = webhook_data.get("messageId", webhook_data.get("message_id", ""))

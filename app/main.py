@@ -14,6 +14,7 @@ Future:
 - POST /v1/convert/email    Developer API
 """
 import logging
+import httpx
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, HTTPException, Response
@@ -102,11 +103,7 @@ async def health():
 
 @app.post("/webhooks/resend")
 async def resend_webhook(request: Request):
-    """
-    Handle inbound email from Resend.
-    
-    Creates a job in the queue for the worker to process.
-    """
+    """Handle inbound email from Resend."""
     try:
         payload = await request.json()
     except:
@@ -122,43 +119,44 @@ async def resend_webhook(request: Request):
     
     message_id = data.get("messageId", data.get("message_id", ""))
     subject = data.get("subject", "")
+    email_id = data.get("email_id", "")
     
     if not from_email or not message_id:
-        logger.warning(f"Missing from_email or message_id in webhook. Payload keys: {payload.keys()}")
+        logger.warning(f"Missing from_email or message_id")
         raise HTTPException(400, "Missing required fields")
+    
+    # Fetch full email content if missing
+    if not data.get("html") and not data.get("text") and email_id:
+        logger.info(f"Fetching email content for {email_id}")
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"https://api.resend.com/emails/{email_id}",
+                    headers={"Authorization": f"Bearer {settings.resend_api_key}"}
+                )
+                if response.status_code == 200:
+                    email_data = response.json()
+                    data["html"] = email_data.get("html", "")
+                    data["text"] = email_data.get("text", "")
+                    logger.info(f"Fetched: HTML={len(data.get('html',''))} Text={len(data.get('text',''))}")
+        except Exception as e:
+            logger.error(f"Failed to fetch email: {e}")
     
     # Deduplicate
     if await db.job_exists(message_id):
-        logger.info(f"Duplicate message ignored: {message_id}")
         return {"status": "duplicate"}
     
-    # Check quota BEFORE creating job
+    # Check quota
     quota_result = await check_quota(from_email)
-    
     if quota_result.action.value == "reject":
-        logger.info(f"Quota exceeded for {from_email}: {quota_result.message}")
-        await db.create_job(
-            message_id=message_id,
-            from_email=from_email,
-            subject=subject,
-            payload={"rejected": True, "reason": quota_result.message},
-        )
-        return {"status": "rejected", "reason": quota_result.message}
+        await db.create_job(message_id=message_id, from_email=from_email, subject=subject, payload={"rejected": True, "reason": quota_result.message})
+        return {"status": "rejected"}
     
-    # Create job with full data
-    job_id = await db.create_job(
-        message_id=message_id,
-        from_email=from_email,
-        subject=subject,
-        payload=data,  # Use data, not payload
-    )
-    
+    # Create job
+    job_id = await db.create_job(message_id=message_id, from_email=from_email, subject=subject, payload=data)
     logger.info(f"Job created: {job_id} for {from_email}")
     
-    return {
-        "status": "queued",
-        "job_id": job_id,
-    }
+    return {"status": "queued", "job_id": job_id}
 
 
 # ===================

@@ -150,13 +150,26 @@ async def extract_pdf_attachments(email_id: str) -> list[bytes]:
             logger.error(f"Failed to fetch attachments: {response.status_code} - {response.text}")
             return pdfs
 
-        attachments = response.json()
+        raw = response.json()
+        logger.info(f"Attachments raw response: {str(raw)[:500]}")
+
+        # Handle Resend wrapping response in {"data": [...]}
+        if isinstance(raw, dict):
+            attachments = raw.get("data", [])
+        else:
+            attachments = raw
+
         logger.info(f"Found {len(attachments)} attachments for email {email_id}")
 
         for att in attachments:
+            if isinstance(att, str):
+                logger.warning(f"Attachment is string, skipping: {att[:100]}")
+                continue
+
             content_type = att.get("content_type", att.get("contentType", ""))
             filename = att.get("filename", "")
             download_url = att.get("download_url", att.get("downloadUrl", ""))
+            logger.info(f"Processing: {filename}, type={content_type}")
 
             if content_type != "application/pdf" and not filename.lower().endswith(".pdf"):
                 logger.info(f"Skipping non-PDF attachment: {filename} ({content_type})")

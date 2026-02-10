@@ -88,6 +88,17 @@ async def resend_webhook(request: Request):
     message_id = data.get("messageId", data.get("message_id", ""))
     subject = data.get("subject", "")
     email_id = data.get("email_id", "")
+
+    # Determine job type from To-Email
+    to_field = data.get("to", [""])[0] if isinstance(data.get("to"), list) else data.get("to", "")
+    to_lower = to_field.lower()
+    if "merge@" in to_lower:
+        job_type = "merge"
+    elif "split@" in to_lower:
+        job_type = "split"
+    else:
+        job_type = "render"
+    logger.info(f"Job type: {job_type} (to: {to_field})")
     
     if not from_email or not message_id:
         logger.warning("Missing from_email or message_id")
@@ -121,11 +132,11 @@ async def resend_webhook(request: Request):
     # Check quota
     quota_result = await check_quota(from_email)
     if quota_result.action.value == "reject":
-        await db.create_job(message_id=message_id, from_email=from_email, subject=subject, payload={"rejected": True, "reason": quota_result.message})
+        await db.create_job(message_id=message_id, from_email=from_email, subject=subject, payload={"rejected": True, "reason": quota_result.message}, job_type=job_type)
         return {"status": "rejected"}
-    
+
     # Create job
-    job_id = await db.create_job(message_id=message_id, from_email=from_email, subject=subject, payload=data)
+    job_id = await db.create_job(message_id=message_id, from_email=from_email, subject=subject, payload=data, job_type=job_type)
     logger.info(f"Job created: {job_id} for {from_email}")
     
     return {"status": "queued", "job_id": job_id}

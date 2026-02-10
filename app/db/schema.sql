@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS conversions (
     from_email VARCHAR(255) NOT NULL,
     from_domain VARCHAR(255) NOT NULL,
     subject TEXT,
+    job_type VARCHAR(20) DEFAULT 'render',  -- render, merge, split
     email_payload JSONB NOT NULL,
     status VARCHAR(20) DEFAULT 'queued',  -- queued, processing, completed, failed, rejected
     error_code VARCHAR(50),

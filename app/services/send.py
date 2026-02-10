@@ -63,6 +63,52 @@ async def send_pdf_reply(
     return await _send_email(payload)
 
 
+async def send_pdf_reply_multi(
+    to_email: str,
+    subject: str,
+    attachments: list[tuple[str, bytes]],
+) -> bool:
+    """
+    Send multiple PDF attachments in one email (used for split).
+
+    Args:
+        attachments: List of (filename, pdf_bytes) tuples.
+    """
+    total_size = sum(len(b) for _, b in attachments)
+    html_body = f"""
+    <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
+        <h2 style="color: #333;">Your PDFs are ready! 📄</h2>
+        <p style="color: #666; line-height: 1.6;">
+            We've split your PDF into <strong>{len(attachments)} pages</strong> and attached them to this message.
+        </p>
+        <p style="color: #666; line-height: 1.6;">
+            <strong>Total size:</strong> {total_size / 1024:.1f} KB
+        </p>
+        <hr style="border: none; border-top: 1px solid #eee; margin: 24px 0;">
+        <p style="color: #999; font-size: 12px;">
+            Sent by <a href="{settings.public_app_url}" style="color: #0066cc;">Back as PDF</a>
+        </p>
+    </div>
+    """
+
+    payload = {
+        "from": f"{settings.from_name} <{settings.from_email}>",
+        "to": [to_email],
+        "subject": f"PDF: {subject}" if subject else "Your PDFs",
+        "html": html_body,
+        "attachments": [
+            {
+                "filename": filename,
+                "content": base64.b64encode(pdf_bytes).decode("utf-8"),
+                "content_type": "application/pdf",
+            }
+            for filename, pdf_bytes in attachments
+        ],
+    }
+
+    return await _send_email(payload)
+
+
 async def send_upgrade_email(to_email: str, used: int, limit: int) -> bool:
     """
     Send upgrade prompt when free user hits limit.

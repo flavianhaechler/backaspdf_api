@@ -5,6 +5,7 @@ from app.services.parse import parse_email
 from app.services.pdf import render_pdf
 from app.services.send import (
     send_pdf_reply,
+    send_pdf_reply_multi,
     send_upgrade_email,
     send_fair_use_email,
     send_rejection_email,
@@ -22,7 +23,8 @@ __all__ = [
     "parse_email",
     "render_pdf",
     "send_pdf_reply",
-    "send_upgrade_email", 
+    "send_pdf_reply_multi",
+    "send_upgrade_email",
     "send_fair_use_email",
     "send_rejection_email",
     "check_quota",

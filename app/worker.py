@@ -16,6 +16,7 @@ from app.services import (
     parse_email,
     render_pdf,
     send_pdf_reply,
+    send_pdf_reply_multi,
     send_upgrade_email,
     send_fair_use_email,
     send_rejection_email,
@@ -23,7 +24,9 @@ from app.services import (
     QuotaResult,
     record_usage,
 )
+from app.services.parse import extract_pdf_attachments
 from app.services.pdf import close_browser
+from app.services.pdf_tools import merge_pdfs, split_pdf
 from app.services.receipt import extract_receipt
 
 settings = get_settings()
@@ -48,21 +51,23 @@ def handle_shutdown(signum, frame):
 async def process_job(job: dict) -> bool:
     """
     Process a single conversion job.
-    
+
+    Routes to render, merge, or split based on job_type.
     Returns True if successful.
     """
     import json
-    
+
     job_id = str(job["id"])
     from_email = job["from_email"]
+    job_type = job.get("job_type", "render")
     payload = job["email_payload"]
-    
+
     # Parse JSON if stored as string
     if isinstance(payload, str):
         payload = json.loads(payload)
-    
-    logger.info(f"Processing job {job_id} from {from_email}")
-    
+
+    logger.info(f"Processing job {job_id} type={job_type} from {from_email}")
+
     # Check if rejected at queue time
     if payload.get("rejected"):
         reason = payload.get("reason", "Quota exceeded")
@@ -70,81 +75,124 @@ async def process_job(job: dict) -> bool:
         await db.update_job_status(job_id, "rejected", "quota_exceeded")
         logger.info(f"Job {job_id} rejected: {reason}")
         return True
-    
+
     try:
-        # Update status
         await db.update_job_status(job_id, "processing")
-        
-        # Parse email
-        parsed = parse_email(payload)
-        logger.info(f"Parsed email: subject='{parsed.subject}'")
-        
-        # Render PDF
-        pdf_bytes = await render_pdf(parsed.html)
-        logger.info(f"PDF rendered: {len(pdf_bytes)} bytes")
-        
-        # Extract receipt data
-        receipt = extract_receipt(
-            subject=parsed.subject,
-            from_email=parsed.from_email,
-            html=parsed.html,
-        )
-        
-        # Generate filename
-        filename = generate_filename(
-            subject=parsed.subject,
-            merchant=receipt.merchant_name if receipt else None,
-            amount=receipt.amount if receipt else None,
-            currency=receipt.currency if receipt else None,
-        )
-        
-        # Record usage
-        new_count = await record_usage(from_email)
-        
-        # Check if we need to send warnings
-        quota_result = await check_quota(from_email)
-        
-        # Send PDF reply
-        await send_pdf_reply(
-            to_email=from_email,
-            subject=parsed.subject or "(No Subject)",
-            pdf_bytes=pdf_bytes,
-            pdf_filename=filename,
-        )
-        
-        # Send warning emails if needed
-        if quota_result.action.value == "allow_warn_upgrade":
-            await send_upgrade_email(from_email, quota_result.used, quota_result.limit)
-            logger.info(f"Sent upgrade email to {from_email}")
-        
-        elif quota_result.action.value == "allow_warn_fair_use":
-            await send_fair_use_email(from_email, quota_result.used, quota_result.limit)
-            logger.info(f"Sent fair use email to {from_email}")
-        
-        # Save document record
-        await db.save_document(
-            owner_email=from_email,
-            source_message_id=parsed.message_id,
-            subject=parsed.subject,
-            from_email=parsed.from_email,
-            pdf_filename=filename,
-            pdf_size_bytes=len(pdf_bytes),
-            merchant_name=receipt.merchant_name if receipt else None,
-            amount=receipt.amount if receipt else None,
-            currency=receipt.currency if receipt else None,
-            category=receipt.category if receipt else None,
-        )
-        
-        # Mark complete
+
+        if job_type == "merge":
+            await _process_merge(job_id, from_email, payload)
+        elif job_type == "split":
+            await _process_split(job_id, from_email, payload)
+        else:
+            await _process_render(job_id, from_email, payload)
+
         await db.update_job_status(job_id, "completed")
         logger.info(f"Job {job_id} completed successfully")
-        
         return True
-        
+
     except Exception as e:
         logger.error(f"Job {job_id} failed: {e}")
         await db.update_job_status(job_id, "failed", str(e)[:50])
         return False
+
+
+async def _process_render(job_id: str, from_email: str, payload: dict):
+    """Process a render job: HTML email -> PDF."""
+    parsed = parse_email(payload)
+    logger.info(f"Parsed email: subject='{parsed.subject}'")
+
+    pdf_bytes = await render_pdf(parsed.html)
+    logger.info(f"PDF rendered: {len(pdf_bytes)} bytes")
+
+    receipt = extract_receipt(
+        subject=parsed.subject,
+        from_email=parsed.from_email,
+        html=parsed.html,
+    )
+
+    filename = generate_filename(
+        subject=parsed.subject,
+        merchant=receipt.merchant_name if receipt else None,
+        amount=receipt.amount if receipt else None,
+        currency=receipt.currency if receipt else None,
+    )
+
+    new_count = await record_usage(from_email)
+    quota_result = await check_quota(from_email)
+
+    await send_pdf_reply(
+        to_email=from_email,
+        subject=parsed.subject or "(No Subject)",
+        pdf_bytes=pdf_bytes,
+        pdf_filename=filename,
+    )
+
+    if quota_result.action.value == "allow_warn_upgrade":
+        await send_upgrade_email(from_email, quota_result.used, quota_result.limit)
+    elif quota_result.action.value == "allow_warn_fair_use":
+        await send_fair_use_email(from_email, quota_result.used, quota_result.limit)
+
+    await db.save_document(
+        owner_email=from_email,
+        source_message_id=parsed.message_id,
+        subject=parsed.subject,
+        from_email=parsed.from_email,
+        pdf_filename=filename,
+        pdf_size_bytes=len(pdf_bytes),
+        merchant_name=receipt.merchant_name if receipt else None,
+        amount=receipt.amount if receipt else None,
+        currency=receipt.currency if receipt else None,
+        category=receipt.category if receipt else None,
+    )
+
+
+async def _process_merge(job_id: str, from_email: str, payload: dict):
+    """Process a merge job: multiple PDF attachments -> one merged PDF."""
+    email_id = payload.get("email_id", "")
+    subject = payload.get("subject", "Merged PDF")
+
+    if not email_id:
+        raise ValueError("No email_id in payload, cannot fetch attachments")
+
+    pdfs = await extract_pdf_attachments(email_id)
+    if len(pdfs) < 2:
+        raise ValueError(f"Need at least 2 PDF attachments to merge, got {len(pdfs)}")
+
+    merged = merge_pdfs(pdfs)
+    filename = generate_filename(subject=subject)
+
+    await record_usage(from_email)
+
+    await send_pdf_reply(
+        to_email=from_email,
+        subject=subject,
+        pdf_bytes=merged,
+        pdf_filename=filename,
+    )
+
+
+async def _process_split(job_id: str, from_email: str, payload: dict):
+    """Process a split job: one PDF attachment -> individual pages."""
+    email_id = payload.get("email_id", "")
+    subject = payload.get("subject", "Split PDF")
+
+    if not email_id:
+        raise ValueError("No email_id in payload, cannot fetch attachments")
+
+    pdfs = await extract_pdf_attachments(email_id)
+    if len(pdfs) == 0:
+        raise ValueError("No PDF attachments found to split")
+
+    # Split the first PDF attachment
+    pages = split_pdf(pdfs[0])
+
+    await record_usage(from_email)
+
+    await send_pdf_reply_multi(
+        to_email=from_email,
+        subject=subject,
+        attachments=pages,
+    )
 
 
 def generate_filename(

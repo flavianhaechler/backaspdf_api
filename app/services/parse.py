@@ -9,6 +9,10 @@ from dataclasses import dataclass
 from typing import Optional
 from email.utils import parseaddr
 
+import httpx
+
+from app.config import get_settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -120,6 +124,57 @@ def resolve_cid_images(html: str, attachments: list) -> str:
         html = html.replace(f"CID:{cid}", data_uri)
     
     return html
+
+
+async def extract_pdf_attachments(email_id: str) -> list[bytes]:
+    """
+    Download PDF attachments from a Resend inbound email.
+
+    Uses Resend API: GET /emails/receiving/{email_id}/attachments
+    Then downloads each PDF attachment.
+
+    Returns:
+        List of PDF files as bytes.
+    """
+    settings = get_settings()
+    headers = {"Authorization": f"Bearer {settings.resend_api_key}"}
+    pdfs = []
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        # Get attachment list
+        response = await client.get(
+            f"https://api.resend.com/emails/receiving/{email_id}/attachments",
+            headers=headers,
+        )
+        if response.status_code != 200:
+            logger.error(f"Failed to fetch attachments: {response.status_code} - {response.text}")
+            return pdfs
+
+        attachments = response.json()
+        logger.info(f"Found {len(attachments)} attachments for email {email_id}")
+
+        for att in attachments:
+            content_type = att.get("content_type", att.get("contentType", ""))
+            filename = att.get("filename", "")
+            download_url = att.get("download_url", att.get("downloadUrl", ""))
+
+            if content_type != "application/pdf" and not filename.lower().endswith(".pdf"):
+                logger.info(f"Skipping non-PDF attachment: {filename} ({content_type})")
+                continue
+
+            if not download_url:
+                logger.warning(f"No download URL for attachment: {filename}")
+                continue
+
+            # Download the PDF
+            dl_response = await client.get(download_url)
+            if dl_response.status_code == 200:
+                pdfs.append(dl_response.content)
+                logger.info(f"Downloaded PDF: {filename} ({len(dl_response.content)} bytes)")
+            else:
+                logger.error(f"Failed to download {filename}: {dl_response.status_code}")
+
+    return pdfs
 
 
 def normalize_html(html: str, subject: str = None, from_email: str = None, from_name: str = None) -> str:

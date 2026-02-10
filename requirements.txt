@@ -17,5 +17,8 @@ stripe>=8.0.0
 # PDF Rendering
 playwright>=1.41.0
 
+# PDF Tools (merge/split)
+pypdf>=4.0.0
+
 # Utilities
 python-multipart>=0.0.9

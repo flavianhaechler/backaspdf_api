@@ -9,6 +9,7 @@ from app.services.send import (
     send_upgrade_email,
     send_fair_use_email,
     send_rejection_email,
+    send_contact_email,
 )
 from app.services.quota import check_quota, record_usage, QuotaResult
 from app.services.stripe import (
@@ -27,6 +28,7 @@ __all__ = [
     "send_upgrade_email",
     "send_fair_use_email",
     "send_rejection_email",
+    "send_contact_email",
     "check_quota",
     "record_usage",
     "QuotaResult",

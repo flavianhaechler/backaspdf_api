@@ -1,13 +1,16 @@
 """
 BackasPDF API - main application.
 """
+import html
 import logging
+import time
 import httpx
+from collections import defaultdict
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 
 from app.config import get_settings
 from app import db
@@ -15,6 +18,7 @@ from app.services import (
     stripe,
     tokens,
     check_quota,
+    send_contact_email,
 )
 from app.services.pdf import close_browser
 
@@ -208,6 +212,55 @@ async def _handle_subscription_deleted(subscription: dict):
         return
     await db.update_sender_plan(sender["email"], "free")
     logger.info(f"Subscription deleted: {sender['email']} downgraded to free")
+
+
+# --- Rate limiter for /contact (in-memory, per-process) ---
+_contact_rate: dict[str, list[float]] = defaultdict(list)
+CONTACT_RATE_LIMIT = 3
+CONTACT_RATE_WINDOW = 3600  # 1 hour
+
+
+def _is_rate_limited(ip: str) -> bool:
+    now = time.time()
+    timestamps = _contact_rate[ip]
+    # Remove expired entries
+    _contact_rate[ip] = [t for t in timestamps if now - t < CONTACT_RATE_WINDOW]
+    if len(_contact_rate[ip]) >= CONTACT_RATE_LIMIT:
+        return True
+    _contact_rate[ip].append(now)
+    return False
+
+
+class ContactRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    email: EmailStr = Field(..., max_length=255)
+    message: str = Field(..., min_length=1, max_length=2000)
+
+
+@app.post("/contact")
+async def contact(req: ContactRequest, request: Request):
+    """Handle contact form submissions."""
+    ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "unknown")
+    if _is_rate_limited(ip):
+        return Response(
+            content='{"error":"Rate limited"}',
+            status_code=429,
+            media_type="application/json",
+        )
+
+    # Trim and sanitize (strip HTML)
+    name = html.escape(req.name.strip())
+    email = req.email.strip()
+    message = html.escape(req.message.strip())
+
+    if not name or not message:
+        raise HTTPException(400, "Invalid input")
+
+    success = await send_contact_email(name, email, message)
+    if not success:
+        raise HTTPException(500, "Internal error")
+
+    return {"status": "sent"}
 
 
 class CheckoutRequest(BaseModel):

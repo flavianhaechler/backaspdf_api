@@ -110,12 +110,7 @@ async def _process_render(job_id: str, from_email: str, payload: dict):
         html=parsed.html,
     )
 
-    filename = generate_filename(
-        subject=parsed.subject,
-        merchant=receipt.merchant_name if receipt else None,
-        amount=receipt.amount if receipt else None,
-        currency=receipt.currency if receipt else None,
-    )
+    filename = generate_filename(subject=parsed.subject)
 
     new_count = await record_usage(from_email)
     quota_result = await check_quota(from_email)

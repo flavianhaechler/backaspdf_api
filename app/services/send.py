@@ -189,6 +189,25 @@ async def send_fair_use_email(to_email: str, used: int, soft_limit: int) -> bool
     return await _send_email(payload)
 
 
+async def send_contact_email(name: str, email: str, message: str) -> bool:
+    """
+    Forward a contact form submission to the team inbox.
+    """
+    payload = {
+        "from": f"{settings.from_name} <noreply@backaspdf.com>",
+        "to": ["flavian.haechler@aquilas.com"],
+        "reply_to": email,
+        "subject": f"[Contact] {name}",
+        "html": (
+            f"<p><strong>From:</strong> {name} ({email})</p>"
+            f"<p><strong>Message:</strong></p>"
+            f"<p>{message}</p>"
+        ),
+    }
+
+    return await _send_email(payload)
+
+
 async def send_rejection_email(to_email: str, reason: str) -> bool:
     """
     Send rejection notice when conversion is blocked.

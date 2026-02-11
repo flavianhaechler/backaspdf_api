@@ -195,7 +195,7 @@ async def send_contact_email(name: str, email: str, message: str) -> bool:
     """
     payload = {
         "from": f"{settings.from_name} <{settings.notify_email}>",
-        "to": ["flavian.haechler@aquilas.com"],
+        "to": ["f@properticker.ch"],
         "reply_to": email,
         "subject": f"[Contact] {name}",
         "html": (

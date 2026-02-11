@@ -194,7 +194,7 @@ async def send_contact_email(name: str, email: str, message: str) -> bool:
     Forward a contact form submission to the team inbox.
     """
     payload = {
-        "from": f"{settings.from_name} <noreply@backaspdf.com>",
+        "from": f"{settings.from_name} <{settings.notify_email}>",
         "to": ["flavian.haechler@aquilas.com"],
         "reply_to": email,
         "subject": f"[Contact] {name}",

@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     from_email: str = "done@backaspdf.com"
     from_name: str = "Back as PDF"
     notify_email: str = "hey@backaspdf.com"
+    contact_email: str = ""
     
     # Stripe
     stripe_secret_key: str = ""

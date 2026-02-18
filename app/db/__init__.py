@@ -156,13 +156,18 @@ async def increment_usage(email: str) -> int:
         return row["count"]
 
 
+_ALLOWED_FLAGS = {"warned_upgrade", "warned_fair_use"}
+
+
 async def set_warned_flag(email: str, flag: str, value: bool = True):
     """Set warned_upgrade or warned_fair_use flag."""
+    if flag not in _ALLOWED_FLAGS:
+        raise ValueError(f"Invalid flag: {flag}")
     month = datetime.now(timezone.utc).strftime("%Y-%m")
     async with get_conn() as conn:
         await conn.execute(
             f"""
-            UPDATE sender_usage 
+            UPDATE sender_usage
             SET {flag} = $3
             WHERE sender_email = $1 AND month_year = $2
             """,

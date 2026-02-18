@@ -153,4 +153,4 @@ GET  /v1/usage          # Usage stats
 
 ## License
 
-Proprietary - All rights reserved.
+MIT License — see [LICENSE](../LICENSE) for details.

@@ -34,9 +34,7 @@ class Settings(BaseSettings):
     portal_token_ttl_minutes: int = 15
     
     # Quotas
-    free_monthly_limit: int = 10
-    pro_soft_limit: int = 500
-    pro_hard_limit: int = 2000
+    monthly_conversion_limit: int = 10
     
     # Processing
     max_inbound_size_mb: int = 10

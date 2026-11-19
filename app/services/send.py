@@ -111,28 +111,18 @@ async def send_pdf_reply_multi(
 
 async def send_upgrade_email(to_email: str, used: int, limit: int) -> bool:
     """
-    Send upgrade prompt when free user hits limit.
+    Send the monthly limit notice when a sender reaches the quota.
     
-    Sent once per month when user reaches their free quota.
+    Sent once per month when the sender reaches the monthly limit.
     """
     html_body = f"""
     <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
-        <h2 style="color: #333;">You've hit your monthly limit 📊</h2>
+        <h2 style="color: #333;">Monthly conversion limit reached</h2>
         <p style="color: #666; line-height: 1.6;">
-            You've used <strong>{used} of {limit}</strong> free conversions this month.
+            You've used <strong>{used} of {limit}</strong> conversions this month.
         </p>
         <p style="color: #666; line-height: 1.6;">
-            Upgrade to <strong>Pro</strong> for unlimited conversions:
-        </p>
-        <div style="margin: 24px 0;">
-            <a href="{settings.public_app_url}/subscribe" 
-               style="display: inline-block; background: #0066cc; color: white; 
-                      padding: 12px 24px; text-decoration: none; border-radius: 6px;">
-                Upgrade to Pro
-            </a>
-        </div>
-        <p style="color: #999; font-size: 14px;">
-            Your limit resets at the start of next month.
+            Further requests will be declined until the limit resets at the start of next month.
         </p>
         <hr style="border: none; border-top: 1px solid #eee; margin: 24px 0;">
         <p style="color: #999; font-size: 12px;">
@@ -144,7 +134,7 @@ async def send_upgrade_email(to_email: str, used: int, limit: int) -> bool:
     payload = {
         "from": f"{settings.from_name} <{settings.notify_email}>",
         "to": [to_email],
-        "subject": "You've reached your free limit — Upgrade to Pro",
+        "subject": "Monthly conversion limit reached — Back as PDF",
         "html": html_body,
     }
     
@@ -153,24 +143,18 @@ async def send_upgrade_email(to_email: str, used: int, limit: int) -> bool:
 
 async def send_fair_use_email(to_email: str, used: int, soft_limit: int) -> bool:
     """
-    Send fair use notice to Pro user approaching hard limit.
+    Send a monthly fair-use notice.
     
-    Friendly heads-up, not a hard block.
+    This remains available for compatibility with the worker's quota action.
     """
     html_body = f"""
     <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
-        <h2 style="color: #333;">High usage notice 📈</h2>
+        <h2 style="color: #333;">Monthly conversion limit reached</h2>
         <p style="color: #666; line-height: 1.6;">
-            You've converted <strong>{used}</strong> emails this month — 
-            that's a lot of PDFs! 🎉
+            You've used <strong>{used} of {soft_limit}</strong> conversions this month.
         </p>
         <p style="color: #666; line-height: 1.6;">
-            Our fair use policy is around {soft_limit} conversions per month.
-            If you regularly need more, let us know — we'd love to hear about
-            your use case.
-        </p>
-        <p style="color: #666; line-height: 1.6;">
-            Just reply to this email if you have any questions.
+            Further requests will be declined until the limit resets at the start of next month.
         </p>
         <hr style="border: none; border-top: 1px solid #eee; margin: 24px 0;">
         <p style="color: #999; font-size: 12px;">
@@ -182,7 +166,7 @@ async def send_fair_use_email(to_email: str, used: int, soft_limit: int) -> bool
     payload = {
         "from": f"{settings.from_name} <{settings.notify_email}>",
         "to": [to_email],
-        "subject": "High usage notice — Back as PDF",
+        "subject": "Monthly conversion limit reached — Back as PDF",
         "html": html_body,
     }
     

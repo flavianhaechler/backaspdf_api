@@ -19,6 +19,7 @@ from app.services.parse import normalize_html, parse_email, text_to_html
 from app.services.pdf_tools import merge_pdfs, split_pdf
 from app.services import quota
 from app.config import Settings
+from app.services import send
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -126,9 +127,7 @@ def test_split_pdf_returns_one_pdf_per_page():
 
 def configure_quota(monkeypatch, plan, used, warned_upgrade=False, warned_fair_use=False):
     monkeypatch.setattr(quota, "settings", SimpleNamespace(
-        free_monthly_limit=10,
-        pro_soft_limit=500,
-        pro_hard_limit=2000,
+        monthly_conversion_limit=10,
     ))
     monkeypatch.setattr(quota.db, "get_sender", AsyncMock(return_value={"plan": plan}))
     monkeypatch.setattr(quota.db, "get_usage", AsyncMock(return_value={
@@ -139,7 +138,7 @@ def configure_quota(monkeypatch, plan, used, warned_upgrade=False, warned_fair_u
     monkeypatch.setattr(quota.db, "set_warned_flag", AsyncMock())
 
 
-def test_free_quota_allows_until_limit_then_warns_once_and_rejects(monkeypatch):
+def test_monthly_quota_allows_until_limit_then_warns_once_and_rejects(monkeypatch):
     configure_quota(monkeypatch, "free", 9)
     assert asyncio.run(quota.check_quota("sender@example.test")).action is quota.QuotaAction.ALLOW
 
@@ -152,20 +151,53 @@ def test_free_quota_allows_until_limit_then_warns_once_and_rejects(monkeypatch):
     assert asyncio.run(quota.check_quota("sender@example.test")).action is quota.QuotaAction.REJECT
 
 
-def test_pro_quota_warns_at_soft_limit_and_rejects_at_hard_limit(monkeypatch):
-    configure_quota(monkeypatch, "pro", 499)
+def test_monthly_quota_is_the_same_for_every_sender_plan(monkeypatch):
+    configure_quota(monkeypatch, "pro", 9)
     assert asyncio.run(quota.check_quota("sender@example.test")).action is quota.QuotaAction.ALLOW
 
-    configure_quota(monkeypatch, "pro", 500)
+    configure_quota(monkeypatch, "pro", 10)
     result = asyncio.run(quota.check_quota("sender@example.test"))
-    assert result.action is quota.QuotaAction.ALLOW_WARN_FAIR_USE
-    quota.db.set_warned_flag.assert_awaited_once_with("sender@example.test", "warned_fair_use", True)
+    assert result.action is quota.QuotaAction.ALLOW_WARN_UPGRADE
+    quota.db.set_warned_flag.assert_awaited_once_with("sender@example.test", "warned_upgrade", True)
 
-    configure_quota(monkeypatch, "pro", 501, warned_fair_use=True)
-    assert asyncio.run(quota.check_quota("sender@example.test")).action is quota.QuotaAction.ALLOW
-
-    configure_quota(monkeypatch, "pro", 2000, warned_fair_use=True)
+    configure_quota(monkeypatch, "pro", 10, warned_upgrade=True)
     assert asyncio.run(quota.check_quota("sender@example.test")).action is quota.QuotaAction.REJECT
+    configure_quota(monkeypatch, "pro", 11)
+    result = asyncio.run(quota.check_quota("sender@example.test"))
+    assert result.action is quota.QuotaAction.REJECT
+    assert "Upgrade" not in result.message
+    assert "Pro" not in result.message
+
+
+def test_limit_notice_and_rejection_emails_have_fair_use_only_copy(monkeypatch):
+    send_email = AsyncMock(return_value=True)
+    monkeypatch.setattr(send, "_send_email", send_email)
+
+    asyncio.run(send.send_upgrade_email("sender@example.test", 10, 10))
+    notice = send_email.await_args.args[0]
+    assert notice["subject"] == "Monthly conversion limit reached — Back as PDF"
+    assert "You've used <strong>10 of 10</strong> conversions this month." in notice["html"]
+    assert "Further requests will be declined" in notice["html"]
+    assert "Upgrade" not in notice["html"]
+    assert "Pro" not in notice["html"]
+    assert "/subscribe" not in notice["html"]
+
+    send_email.reset_mock()
+    asyncio.run(send.send_fair_use_email("sender@example.test", 10, 10))
+    fair_use_notice = send_email.await_args.args[0]
+    assert "Pro" not in fair_use_notice["html"]
+    assert "Upgrade" not in fair_use_notice["html"]
+
+    send_email.reset_mock()
+    asyncio.run(send.send_rejection_email(
+        "sender@example.test",
+        "Monthly limit of 10 conversions reached. Your limit resets at the start of next month.",
+    ))
+    rejection = send_email.await_args.args[0]
+    assert "Monthly limit of 10 conversions reached." in rejection["html"]
+    assert "Upgrade" not in rejection["html"]
+    assert "Pro" not in rejection["html"]
+    assert "/subscribe" not in rejection["html"]
 
 
 def test_resend_webhook_fetches_api_content_and_queues_job(monkeypatch):
@@ -383,6 +415,16 @@ def test_resend_api_failure_does_not_create_job(monkeypatch):
 
 def test_billing_is_disabled_by_default():
     assert Settings(_env_file=None).billing_enabled is False
+
+
+def test_monthly_conversion_limit_defaults_to_the_previous_free_limit():
+    assert Settings(_env_file=None).monthly_conversion_limit == 10
+
+
+def test_monthly_conversion_limit_reads_environment_variable(monkeypatch):
+    monkeypatch.setenv("MONTHLY_CONVERSION_LIMIT", "15")
+
+    assert Settings(_env_file=None).monthly_conversion_limit == 15
 
 
 def test_billing_routes_return_404_when_disabled_without_side_effects(monkeypatch):

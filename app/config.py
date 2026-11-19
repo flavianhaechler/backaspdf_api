@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     contact_email: str = ""
     
     # Stripe
+    billing_enabled: bool = False
     stripe_secret_key: str = ""
     stripe_webhook_secret: str = ""
     stripe_price_id_pro: str = ""

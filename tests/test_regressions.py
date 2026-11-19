@@ -9,7 +9,7 @@ from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 from fastapi.testclient import TestClient
 from pypdf import PdfReader, PdfWriter
@@ -18,6 +18,7 @@ from app import main, worker
 from app.services.parse import normalize_html, parse_email, text_to_html
 from app.services.pdf_tools import merge_pdfs, split_pdf
 from app.services import quota
+from app.config import Settings
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -378,3 +379,70 @@ def test_resend_api_failure_does_not_create_job(monkeypatch):
 
     assert response.status_code == 502
     create_job.assert_not_awaited()
+
+
+def test_billing_is_disabled_by_default():
+    assert Settings(_env_file=None).billing_enabled is False
+
+
+def test_billing_routes_return_404_when_disabled_without_side_effects(monkeypatch):
+    monkeypatch.setattr(main.settings, "billing_enabled", False, raising=False)
+    stripe_event = MagicMock(return_value={"type": "unknown", "data": {"object": {}}})
+    checkout = AsyncMock(return_value="https://stripe.example.test/checkout")
+    portal_session = AsyncMock(return_value="https://stripe.example.test/portal")
+    get_sender = AsyncMock(return_value={"stripe_customer_id": "cus_test"})
+    verify_token = MagicMock(return_value={"email": "alex@example.com"})
+    monkeypatch.setattr(main.stripe, "construct_webhook_event", stripe_event)
+    monkeypatch.setattr(main.stripe, "create_checkout_session", checkout)
+    monkeypatch.setattr(main.stripe, "create_portal_session", portal_session)
+    monkeypatch.setattr(main.db, "get_sender", get_sender)
+    monkeypatch.setattr(main.tokens, "verify_portal_token", verify_token)
+
+    client = TestClient(main.app)
+    responses = [
+        client.post("/webhooks/stripe", content=b"{}"),
+        client.post("/billing/checkout", json={"email": "alex@example.com"}),
+        client.post("/billing/portal_link", json={"email": "alex@example.com"}),
+        client.get("/billing/portal?token=test-token"),
+    ]
+
+    assert [response.status_code for response in responses] == [404, 404, 404, 404]
+    stripe_event.assert_not_called()
+    checkout.assert_not_awaited()
+    portal_session.assert_not_awaited()
+    get_sender.assert_not_awaited()
+    verify_token.assert_not_called()
+
+
+def test_billing_routes_keep_existing_behavior_when_enabled(monkeypatch):
+    monkeypatch.setattr(main.settings, "billing_enabled", True, raising=False)
+    stripe_event = MagicMock(return_value={"type": "unknown", "data": {"object": {}}})
+    checkout = AsyncMock(return_value="https://stripe.example.test/checkout")
+    portal_session = AsyncMock(return_value="https://stripe.example.test/portal")
+    get_sender = AsyncMock(return_value={"stripe_customer_id": "cus_test"})
+    create_token = MagicMock(return_value="signed-token")
+    verify_token = MagicMock(return_value={"email": "alex@example.com"})
+    monkeypatch.setattr(main.stripe, "construct_webhook_event", stripe_event)
+    monkeypatch.setattr(main.stripe, "create_checkout_session", checkout)
+    monkeypatch.setattr(main.stripe, "create_portal_session", portal_session)
+    monkeypatch.setattr(main.db, "get_sender", get_sender)
+    monkeypatch.setattr(main.tokens, "create_portal_token", create_token)
+    monkeypatch.setattr(main.tokens, "verify_portal_token", verify_token)
+
+    client = TestClient(main.app, follow_redirects=False)
+    webhook = client.post("/webhooks/stripe", content=b"{}")
+    checkout_response = client.post("/billing/checkout", json={"email": "alex@example.com"})
+    portal_link = client.post("/billing/portal_link", json={"email": "alex@example.com"})
+    portal = client.get("/billing/portal?token=signed-token")
+
+    assert webhook.status_code == 200
+    assert webhook.json() == {"received": True}
+    assert checkout_response.status_code == 200
+    assert checkout_response.json() == {"url": "https://stripe.example.test/checkout"}
+    assert portal_link.status_code == 200
+    assert portal_link.json()["url"].endswith("/billing/portal?token=signed-token")
+    assert portal.status_code == 302
+    assert portal.headers["location"] == "https://stripe.example.test/portal"
+    stripe_event.assert_called_once()
+    checkout.assert_awaited_once_with("alex@example.com")
+    portal_session.assert_awaited_once_with("cus_test")

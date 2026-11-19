@@ -192,6 +192,9 @@ async def resend_webhook(request: Request):
 @app.post("/webhooks/stripe")
 async def stripe_webhook(request: Request):
     """Handle Stripe webhook events."""
+    if not settings.billing_enabled:
+        raise HTTPException(404, "Not found")
+
     payload = await request.body()
     signature = request.headers.get("stripe-signature", "")
     
@@ -315,6 +318,9 @@ class PortalLinkRequest(BaseModel):
 
 @app.post("/billing/checkout")
 async def create_checkout(req: CheckoutRequest):
+    if not settings.billing_enabled:
+        raise HTTPException(404, "Not found")
+
     try:
         url = await stripe.create_checkout_session(req.email)
         return {"url": url}
@@ -325,6 +331,9 @@ async def create_checkout(req: CheckoutRequest):
 
 @app.post("/billing/portal_link")
 async def create_portal_link(req: PortalLinkRequest):
+    if not settings.billing_enabled:
+        raise HTTPException(404, "Not found")
+
     sender = await db.get_sender(req.email)
     if not sender or not sender.get("stripe_customer_id"):
         raise HTTPException(404, "No subscription found for this email")
@@ -336,6 +345,9 @@ async def create_portal_link(req: PortalLinkRequest):
 
 @app.get("/billing/portal")
 async def portal_redirect(token: str):
+    if not settings.billing_enabled:
+        raise HTTPException(404, "Not found")
+
     try:
         payload = tokens.verify_portal_token(token)
     except ValueError as e:

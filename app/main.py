@@ -2,6 +2,7 @@
 BackasPDF API - main application.
 """
 import html
+import json
 import logging
 import time
 import httpx
@@ -11,6 +12,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
+from svix.webhooks import Webhook, WebhookVerificationError
 
 from app.config import get_settings
 from app import db
@@ -19,6 +21,7 @@ from app.services import (
     tokens,
     check_quota,
     send_contact_email,
+    send_upgrade_email,
 )
 from app.services.pdf import close_browser
 
@@ -76,14 +79,46 @@ async def health():
 @app.post("/webhooks/resend")
 async def resend_webhook(request: Request):
     """Handle inbound email from Resend."""
+    raw_body = await request.body()
+    secret = settings.resend_webhook_secret
+    if not secret:
+        local_environment = settings.environment.lower() in {"development", "dev", "local"}
+        if local_environment and settings.resend_webhook_allow_unsigned_local:
+            logger.warning("Unsigned Resend webhook verification explicitly enabled for local development")
+        else:
+            logger.error("RESEND_WEBHOOK_SECRET is not configured; rejecting Resend webhook")
+            raise HTTPException(401, "Invalid signature")
+    else:
+        signature_headers = {
+            "svix-id": request.headers.get("svix-id"),
+            "svix-timestamp": request.headers.get("svix-timestamp"),
+            "svix-signature": request.headers.get("svix-signature"),
+        }
+        if any(value is None for value in signature_headers.values()):
+            logger.warning("Rejected Resend webhook: signature missing or invalid")
+            raise HTTPException(401, "Invalid signature")
+        try:
+            Webhook(secret).verify(
+                raw_body.decode("utf-8"),
+                {key: value for key, value in signature_headers.items() if value is not None},
+            )
+        except (WebhookVerificationError, UnicodeDecodeError):
+            logger.warning("Rejected Resend webhook: signature missing or invalid")
+            raise HTTPException(401, "Invalid signature")
+
     try:
-        payload = await request.json()
-    except:
+        payload = json.loads(raw_body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
         raise HTTPException(400, "Invalid JSON")
-    
+
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Invalid JSON")
+
     # Resend wraps email in "data" field
     data = payload.get("data", payload)
-    
+    if not isinstance(data, dict):
+        raise HTTPException(400, "Invalid email data")
+
     # Extract metadata
     from_email = data.get("from", "")
     if "<" in from_email:
@@ -92,6 +127,9 @@ async def resend_webhook(request: Request):
     message_id = data.get("messageId", data.get("message_id", ""))
     subject = data.get("subject", "")
     email_id = data.get("email_id", "")
+
+    if not email_id:
+        raise HTTPException(400, "Missing email_id")
 
     # Determine job type from To-Email
     to_field = data.get("to", [""])[0] if isinstance(data.get("to"), list) else data.get("to", "")
@@ -102,32 +140,38 @@ async def resend_webhook(request: Request):
         job_type = "split"
     else:
         job_type = "render"
-    logger.info(f"Job type: {job_type} (to: {to_field})")
+    logger.info("Inbound job type=%s", job_type)
     
     if not from_email or not message_id:
         logger.warning("Missing from_email or message_id")
         raise HTTPException(400, "Missing required fields")
     
     # Fetch full email content from Resend API
+    email_fetched = False
     if email_id:
-        logger.info(f"Fetching email content for {email_id}")
+        logger.info("Fetching email content from Resend")
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"https://api.resend.com/emails/receiving/{email_id}",
                     headers={"Authorization": f"Bearer {settings.resend_api_key}"}
                 )
-                logger.info(f"Resend API response: {response.status_code}")
                 if response.status_code == 200:
                     email_data = response.json()
-                    data["html"] = email_data.get("html", "")
-                    data["text"] = email_data.get("text", "")
+                    if not isinstance(email_data, dict):
+                        raise ValueError("Invalid Resend email response")
+                    data["html"] = email_data.get("html") or ""
+                    data["text"] = email_data.get("text") or ""
                     data["headers"] = email_data.get("headers", [])
                     logger.info(f"Fetched: HTML={len(data.get('html',''))} Text={len(data.get('text',''))}")
+                    email_fetched = True
                 else:
-                    logger.error(f"Failed to fetch email: {response.status_code} - {response.text}")
-        except Exception as e:
-            logger.error(f"Error fetching email: {e}")
+                    logger.error("Resend email fetch failed with status %s", response.status_code)
+        except (httpx.HTTPError, ValueError):
+            logger.error("Resend email fetch failed")
+
+    if not email_fetched:
+        raise HTTPException(502, "Failed to fetch email from Resend")
     
     # Deduplicate
     if await db.job_exists(message_id):
@@ -138,10 +182,12 @@ async def resend_webhook(request: Request):
     if quota_result.action.value == "reject":
         await db.create_job(message_id=message_id, from_email=from_email, subject=subject, payload={"rejected": True, "reason": quota_result.message}, job_type=job_type)
         return {"status": "rejected"}
+    if quota_result.action.value == "allow_warn_upgrade":
+        await send_upgrade_email(from_email, quota_result.used, quota_result.limit)
 
     # Create job
     job_id = await db.create_job(message_id=message_id, from_email=from_email, subject=subject, payload=data, job_type=job_type)
-    logger.info(f"Job created: {job_id} for {from_email}")
+    logger.info("Job created: %s type=%s", job_id, job_type)
     
     return {"status": "queued", "job_id": job_id}
 
@@ -149,13 +195,16 @@ async def resend_webhook(request: Request):
 @app.post("/webhooks/stripe")
 async def stripe_webhook(request: Request):
     """Handle Stripe webhook events."""
+    if not settings.billing_enabled:
+        raise HTTPException(404, "Not found")
+
     payload = await request.body()
     signature = request.headers.get("stripe-signature", "")
     
     try:
         event = stripe.construct_webhook_event(payload, signature)
     except Exception as e:
-        logger.error(f"Stripe webhook verification failed: {e}")
+        logger.error("Stripe webhook verification failed (%s)", type(e).__name__)
         raise HTTPException(400, "Invalid signature")
     
     event_type = event["type"]
@@ -178,7 +227,7 @@ async def _handle_checkout_completed(session: dict):
     email = session.get("customer_email") or session.get("metadata", {}).get("email")
     
     if not email:
-        logger.error("No email in checkout session")
+        logger.error("Checkout event has no sender")
         return
     
     sender = await db.get_sender(email)
@@ -187,7 +236,7 @@ async def _handle_checkout_completed(session: dict):
     
     await db.update_sender_stripe(email, customer_id, subscription_id)
     await db.update_sender_plan(email, "pro")
-    logger.info(f"Checkout completed: {email} upgraded to pro")
+    logger.info("Checkout completed; billing record updated")
 
 
 async def _handle_subscription_updated(subscription: dict):
@@ -202,7 +251,7 @@ async def _handle_subscription_updated(subscription: dict):
         await db.update_sender_plan(sender["email"], "pro")
     else:
         await db.update_sender_plan(sender["email"], "free")
-    logger.info(f"Subscription updated: {sender['email']} status={status}")
+    logger.info("Subscription updated (status=%s)", status)
 
 
 async def _handle_subscription_deleted(subscription: dict):
@@ -211,7 +260,7 @@ async def _handle_subscription_deleted(subscription: dict):
     if not sender:
         return
     await db.update_sender_plan(sender["email"], "free")
-    logger.info(f"Subscription deleted: {sender['email']} downgraded to free")
+    logger.info("Subscription deleted")
 
 
 # --- Rate limiter for /contact (in-memory, per-process) ---
@@ -272,16 +321,22 @@ class PortalLinkRequest(BaseModel):
 
 @app.post("/billing/checkout")
 async def create_checkout(req: CheckoutRequest):
+    if not settings.billing_enabled:
+        raise HTTPException(404, "Not found")
+
     try:
         url = await stripe.create_checkout_session(req.email)
         return {"url": url}
     except Exception as e:
-        logger.error(f"Checkout error: {e}")
+        logger.error("Checkout failed (%s)", type(e).__name__)
         raise HTTPException(500, "Failed to create checkout session")
 
 
 @app.post("/billing/portal_link")
 async def create_portal_link(req: PortalLinkRequest):
+    if not settings.billing_enabled:
+        raise HTTPException(404, "Not found")
+
     sender = await db.get_sender(req.email)
     if not sender or not sender.get("stripe_customer_id"):
         raise HTTPException(404, "No subscription found for this email")
@@ -293,6 +348,9 @@ async def create_portal_link(req: PortalLinkRequest):
 
 @app.get("/billing/portal")
 async def portal_redirect(token: str):
+    if not settings.billing_enabled:
+        raise HTTPException(404, "Not found")
+
     try:
         payload = tokens.verify_portal_token(token)
     except ValueError as e:
@@ -307,5 +365,5 @@ async def portal_redirect(token: str):
         portal_url = await stripe.create_portal_session(sender["stripe_customer_id"])
         return Response(status_code=302, headers={"Location": portal_url})
     except Exception as e:
-        logger.error(f"Portal redirect error: {e}")
+        logger.error("Portal redirect failed (%s)", type(e).__name__)
         raise HTTPException(500, "Failed to access billing portal")

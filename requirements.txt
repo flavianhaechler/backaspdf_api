@@ -11,6 +11,9 @@ asyncpg>=0.29.0
 # HTTP Client
 httpx>=0.26.0
 
+# Webhook verification
+svix>=1.0.0
+
 # Stripe
 stripe>=8.0.0
 

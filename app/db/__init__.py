@@ -225,7 +225,13 @@ async def update_job_status(job_id: str, status: str, error: str = None):
         await conn.execute(
             """
             UPDATE conversions 
-            SET status = $2, error_code = $3, processed_at = NOW()
+            SET status = $2,
+                error_code = $3,
+                processed_at = NOW(),
+                email_payload = CASE
+                    WHEN $2 IN ('completed', 'failed', 'rejected') THEN '{}'::jsonb
+                    ELSE email_payload
+                END
             WHERE id = $1
             """,
             job_id, status, error

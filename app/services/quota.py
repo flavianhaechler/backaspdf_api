@@ -36,35 +36,20 @@ async def check_quota(email: str) -> QuotaResult:
     
     Returns QuotaResult with action to take:
     - ALLOW: Process normally
-    - ALLOW_WARN_UPGRADE: Process + send upgrade email (free user at limit)
-    - ALLOW_WARN_FAIR_USE: Process + send fair use notice (pro user high usage)
-    - REJECT: Don't process (hard limit exceeded)
+    - ALLOW_WARN_UPGRADE: Process + send the one-time monthly limit notice
+    - REJECT: Don't process (monthly limit exceeded)
     """
     # Get or create sender
     sender = await db.get_sender(email)
     if not sender:
         sender = await db.create_sender(email)
     
-    plan = sender["plan"]
-    
     # Get current usage
     usage = await db.get_usage(email)
     used = usage["count"]
     warned_upgrade = usage.get("warned_upgrade", False)
-    warned_fair_use = usage.get("warned_fair_use", False)
-    
-    # Determine limits based on plan
-    if plan == "pro":
-        return await _check_pro_quota(email, used, warned_fair_use)
-    else:
-        return await _check_free_quota(email, used, warned_upgrade)
+    limit = settings.monthly_conversion_limit
 
-
-async def _check_free_quota(email: str, used: int, warned: bool) -> QuotaResult:
-    """Check quota for free users."""
-    limit = settings.free_monthly_limit
-    
-    # Under limit
     if used < limit:
         return QuotaResult(
             action=QuotaAction.ALLOW,
@@ -72,70 +57,23 @@ async def _check_free_quota(email: str, used: int, warned: bool) -> QuotaResult:
             used=used,
             limit=limit,
         )
-    
-    # At limit, first time
-    if used == limit and not warned:
+
+    if used == limit and not warned_upgrade:
         await db.set_warned_flag(email, "warned_upgrade", True)
         return QuotaResult(
             action=QuotaAction.ALLOW_WARN_UPGRADE,
             plan="free",
             used=used,
             limit=limit,
-            message="Free limit reached",
+            message="Monthly conversion limit reached",
         )
-    
-    # Over limit
+
     return QuotaResult(
         action=QuotaAction.REJECT,
         plan="free",
         used=used,
         limit=limit,
-        message=f"Monthly limit of {limit} conversions reached. Upgrade to Pro for unlimited conversions.",
-    )
-
-
-async def _check_pro_quota(email: str, used: int, warned: bool) -> QuotaResult:
-    """Check quota for pro users."""
-    soft_limit = settings.pro_soft_limit
-    hard_limit = settings.pro_hard_limit
-    
-    # Under soft limit
-    if used < soft_limit:
-        return QuotaResult(
-            action=QuotaAction.ALLOW,
-            plan="pro",
-            used=used,
-            limit=soft_limit,
-        )
-    
-    # Between soft and hard limit
-    if used < hard_limit:
-        # First time hitting soft limit
-        if not warned:
-            await db.set_warned_flag(email, "warned_fair_use", True)
-            return QuotaResult(
-                action=QuotaAction.ALLOW_WARN_FAIR_USE,
-                plan="pro",
-                used=used,
-                limit=soft_limit,
-                message="High usage notice",
-            )
-        
-        # Already warned, still allow
-        return QuotaResult(
-            action=QuotaAction.ALLOW,
-            plan="pro",
-            used=used,
-            limit=soft_limit,
-        )
-    
-    # Hard limit reached
-    return QuotaResult(
-        action=QuotaAction.REJECT,
-        plan="pro",
-        used=used,
-        limit=hard_limit,
-        message=f"Fair use limit of {hard_limit} conversions reached. Contact support for higher limits.",
+        message=f"Monthly limit of {limit} conversions reached. Your limit resets at the start of next month.",
     )
 
 

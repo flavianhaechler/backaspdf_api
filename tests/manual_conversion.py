@@ -1,7 +1,7 @@
 """
 Test script - Email to PDF conversion.
 
-Run: python test_conversion.py
+Run: python tests/manual_conversion.py
 
 Tests the core conversion without database, Resend, or Stripe.
 """
@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 # Add app to path
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.services.parse import parse_email
 from app.services.pdf import render_pdf, close_browser

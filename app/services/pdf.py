@@ -5,19 +5,25 @@ This is a pure function: HTML in, PDF bytes out.
 Used by both consumer flow and developer API.
 """
 import asyncio
+import ipaddress
 import logging
+import socket
 from typing import Optional
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
-from playwright.async_api import async_playwright, Browser, BrowserContext
+from playwright.async_api import async_playwright, Browser, BrowserContext, Playwright, Route
 
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+_ALLOWED_RENDER_RESOURCE_TYPES = {"image", "stylesheet", "font"}
+
 # Browser instance (reused across renders)
 _browser: Optional[Browser] = None
+_playwright: Optional[Playwright] = None
 _browser_lock = asyncio.Lock()
 
 
@@ -34,9 +40,62 @@ class PDFOptions:
     scale: float = 1.0
 
 
+async def _resolve_host_addresses(host: str, port: int) -> list[tuple]:
+    loop = asyncio.get_running_loop()
+    return await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+
+
+async def _is_allowed_render_request(url: str, resource_type: str) -> bool:
+    if resource_type not in _ALLOWED_RENDER_RESOURCE_TYPES:
+        return False
+
+    try:
+        parsed = urlsplit(url)
+        scheme = parsed.scheme.lower()
+        if scheme == "data":
+            return True
+        if scheme not in {"http", "https"} or not parsed.hostname:
+            return False
+        if parsed.username is not None or parsed.password is not None:
+            return False
+        port = parsed.port or (443 if scheme == "https" else 80)
+    except ValueError:
+        return False
+
+    try:
+        addresses = [ipaddress.ip_address(parsed.hostname)]
+    except ValueError:
+        try:
+            resolved = await asyncio.wait_for(
+                _resolve_host_addresses(parsed.hostname, port),
+                timeout=5,
+            )
+        except (OSError, UnicodeError, asyncio.TimeoutError):
+            return False
+        if not resolved:
+            return False
+        try:
+            addresses = [
+                ipaddress.ip_address(result[4][0].split("%", 1)[0])
+                for result in resolved
+            ]
+        except (IndexError, ValueError):
+            return False
+
+    return all(address.is_global for address in addresses)
+
+
+async def _route_render_request(route: Route) -> None:
+    request = route.request
+    if await _is_allowed_render_request(request.url, request.resource_type):
+        await route.continue_()
+    else:
+        await route.abort()
+
+
 async def get_browser() -> Browser:
     """Get or create browser instance."""
-    global _browser
+    global _browser, _playwright
     
     async with _browser_lock:
         # Always check if browser is still usable
@@ -49,8 +108,9 @@ async def get_browser() -> Browser:
         
         if _browser is None:
             logger.info("Starting Playwright browser")
-            playwright = await async_playwright().start()
-            _browser = await playwright.chromium.launch(
+            if _playwright is None:
+                _playwright = await async_playwright().start()
+            _browser = await _playwright.chromium.launch(
                 headless=True,
                 args=[
                     "--disable-gpu",
@@ -67,11 +127,20 @@ async def get_browser() -> Browser:
 
 async def close_browser():
     """Close browser instance (call on shutdown)."""
-    global _browser
-    if _browser:
-        await _browser.close()
-        _browser = None
-        logger.info("Playwright browser closed")
+    global _browser, _playwright
+    browser = _browser
+    playwright = _playwright
+    _browser = None
+    _playwright = None
+
+    try:
+        if browser:
+            await browser.close()
+    finally:
+        if playwright:
+            await playwright.stop()
+
+    logger.info("Playwright browser closed")
 
 
 async def render_pdf(
@@ -88,9 +157,11 @@ async def render_pdf(
         context = await browser.new_context(
             viewport={"width": 1280, "height": 720},
             device_scale_factor=2,
+            java_script_enabled=False,
         )
         
         context.set_default_timeout(settings.max_render_time_seconds * 1000)
+        await context.route("**/*", _route_render_request)
         page = await context.new_page()
         await page.set_content(html, wait_until="networkidle")
         await asyncio.sleep(0.5)
@@ -118,11 +189,11 @@ async def render_pdf(
         _browser = None
         
         if _retry:
-            logger.warning(f"Browser error, retrying: {e}")
+            logger.warning("Browser error, retrying (%s)", type(e).__name__)
             return await render_pdf(html, options, _retry=False)
         
-        logger.error(f"PDF render error: {e}")
-        raise RuntimeError(f"PDF rendering failed: {e}")
+        logger.error("PDF render failed (%s)", type(e).__name__)
+        raise RuntimeError("PDF rendering failed") from e
 
 
 async def render_url_to_pdf(
@@ -147,6 +218,7 @@ async def render_url_to_pdf(
         context = await browser.new_context(
             viewport={"width": 1280, "height": 720},
             device_scale_factor=2,
+            java_script_enabled=False,
         )
         context.set_default_timeout(settings.max_render_time_seconds * 1000)
         
@@ -177,7 +249,7 @@ async def render_url_to_pdf(
             scale=options.scale,
         )
         
-        logger.info(f"URL PDF rendered: {len(pdf_bytes)} bytes from {url}")
+        logger.info("URL PDF rendered: %s bytes", len(pdf_bytes))
         return pdf_bytes
         
     finally:

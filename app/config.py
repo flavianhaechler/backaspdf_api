@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     # Resend
     resend_api_key: str = ""
     resend_webhook_secret: str = ""
+    resend_webhook_allow_unsigned_local: bool = False
     inbound_email: str = "do@backaspdf.com"
     from_email: str = "done@backaspdf.com"
     from_name: str = "Back as PDF"
@@ -19,6 +20,7 @@ class Settings(BaseSettings):
     contact_email: str = ""
     
     # Stripe
+    billing_enabled: bool = False
     stripe_secret_key: str = ""
     stripe_webhook_secret: str = ""
     stripe_price_id_pro: str = ""
@@ -32,9 +34,7 @@ class Settings(BaseSettings):
     portal_token_ttl_minutes: int = 15
     
     # Quotas
-    free_monthly_limit: int = 10
-    pro_soft_limit: int = 500
-    pro_hard_limit: int = 2000
+    monthly_conversion_limit: int = 10
     
     # Processing
     max_inbound_size_mb: int = 10

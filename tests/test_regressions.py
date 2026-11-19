@@ -489,6 +489,8 @@ def test_update_job_status_clears_payload_only_for_terminal_statuses(monkeypatch
     query, job_id, saved_status, error = connection.execute.await_args.args
     normalized_query = " ".join(query.split())
     assert "email_payload = CASE" in query
+    assert "SET status = $2::varchar" in query
+    assert "WHEN $2::varchar IN ('completed', 'failed', 'rejected')" in query
     assert "THEN '{}'::jsonb ELSE email_payload END" in normalized_query
     assert "('completed', 'failed', 'rejected')" in query
     assert (job_id, saved_status, error) == ("job-123", status, "safe-error")

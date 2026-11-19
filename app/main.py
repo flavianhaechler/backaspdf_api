@@ -2,6 +2,7 @@
 BackasPDF API - main application.
 """
 import html
+import json
 import logging
 import time
 import httpx
@@ -11,6 +12,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
+from svix.webhooks import Webhook, WebhookVerificationError
 
 from app.config import get_settings
 from app import db
@@ -76,14 +78,46 @@ async def health():
 @app.post("/webhooks/resend")
 async def resend_webhook(request: Request):
     """Handle inbound email from Resend."""
+    raw_body = await request.body()
+    secret = settings.resend_webhook_secret
+    if not secret:
+        local_environment = settings.environment.lower() in {"development", "dev", "local"}
+        if local_environment and settings.resend_webhook_allow_unsigned_local:
+            logger.warning("Unsigned Resend webhook verification explicitly enabled for local development")
+        else:
+            logger.error("RESEND_WEBHOOK_SECRET is not configured; rejecting Resend webhook")
+            raise HTTPException(401, "Invalid signature")
+    else:
+        signature_headers = {
+            "svix-id": request.headers.get("svix-id"),
+            "svix-timestamp": request.headers.get("svix-timestamp"),
+            "svix-signature": request.headers.get("svix-signature"),
+        }
+        if any(value is None for value in signature_headers.values()):
+            logger.warning("Rejected Resend webhook: signature missing or invalid")
+            raise HTTPException(401, "Invalid signature")
+        try:
+            Webhook(secret).verify(
+                raw_body.decode("utf-8"),
+                {key: value for key, value in signature_headers.items() if value is not None},
+            )
+        except (WebhookVerificationError, UnicodeDecodeError):
+            logger.warning("Rejected Resend webhook: signature missing or invalid")
+            raise HTTPException(401, "Invalid signature")
+
     try:
-        payload = await request.json()
-    except:
+        payload = json.loads(raw_body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
         raise HTTPException(400, "Invalid JSON")
-    
+
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Invalid JSON")
+
     # Resend wraps email in "data" field
     data = payload.get("data", payload)
-    
+    if not isinstance(data, dict):
+        raise HTTPException(400, "Invalid email data")
+
     # Extract metadata
     from_email = data.get("from", "")
     if "<" in from_email:
@@ -92,6 +126,9 @@ async def resend_webhook(request: Request):
     message_id = data.get("messageId", data.get("message_id", ""))
     subject = data.get("subject", "")
     email_id = data.get("email_id", "")
+
+    if not email_id:
+        raise HTTPException(400, "Missing email_id")
 
     # Determine job type from To-Email
     to_field = data.get("to", [""])[0] if isinstance(data.get("to"), list) else data.get("to", "")
@@ -109,6 +146,7 @@ async def resend_webhook(request: Request):
         raise HTTPException(400, "Missing required fields")
     
     # Fetch full email content from Resend API
+    email_fetched = False
     if email_id:
         logger.info(f"Fetching email content for {email_id}")
         try:
@@ -117,17 +155,22 @@ async def resend_webhook(request: Request):
                     f"https://api.resend.com/emails/receiving/{email_id}",
                     headers={"Authorization": f"Bearer {settings.resend_api_key}"}
                 )
-                logger.info(f"Resend API response: {response.status_code}")
                 if response.status_code == 200:
                     email_data = response.json()
-                    data["html"] = email_data.get("html", "")
-                    data["text"] = email_data.get("text", "")
+                    if not isinstance(email_data, dict):
+                        raise ValueError("Invalid Resend email response")
+                    data["html"] = email_data.get("html") or ""
+                    data["text"] = email_data.get("text") or ""
                     data["headers"] = email_data.get("headers", [])
                     logger.info(f"Fetched: HTML={len(data.get('html',''))} Text={len(data.get('text',''))}")
+                    email_fetched = True
                 else:
-                    logger.error(f"Failed to fetch email: {response.status_code} - {response.text}")
-        except Exception as e:
-            logger.error(f"Error fetching email: {e}")
+                    logger.error("Resend email fetch failed with status %s", response.status_code)
+        except (httpx.HTTPError, ValueError):
+            logger.error("Resend email fetch failed")
+
+    if not email_fetched:
+        raise HTTPException(502, "Failed to fetch email from Resend")
     
     # Deduplicate
     if await db.job_exists(message_id):

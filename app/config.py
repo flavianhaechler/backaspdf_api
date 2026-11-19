@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     # Resend
     resend_api_key: str = ""
     resend_webhook_secret: str = ""
+    resend_webhook_allow_unsigned_local: bool = False
     inbound_email: str = "do@backaspdf.com"
     from_email: str = "done@backaspdf.com"
     from_name: str = "Back as PDF"

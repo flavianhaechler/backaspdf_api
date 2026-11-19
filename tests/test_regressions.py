@@ -58,6 +58,87 @@ def fixture_html(name: str) -> str:
     return (FIXTURES / name).read_text(encoding="utf-8")
 
 
+def install_fake_renderer(monkeypatch, hang_attempts=0):
+    state = {
+        "launches": 0,
+        "browser_closes": 0,
+        "playwright_stops": 0,
+        "forced_kills": 0,
+        "contexts": [],
+    }
+
+    class FakePage:
+        async def set_content(self, html, wait_until):
+            if state["launches"] <= hang_attempts:
+                await asyncio.Event().wait()
+
+        async def goto(self, url, wait_until):
+            return None
+
+        async def pdf(self, **options):
+            return b"pdf"
+
+    class FakeContext:
+        def __init__(self):
+            self.options = []
+            self.route_pattern = None
+            self.route_handler = None
+
+        def set_default_timeout(self, timeout):
+            self.timeout = timeout
+
+        async def route(self, pattern, handler):
+            self.route_pattern = pattern
+            self.route_handler = handler
+
+        async def new_page(self):
+            return FakePage()
+
+        async def close(self):
+            return None
+
+    class FakeBrowser:
+        def __init__(self):
+            self.closed = False
+
+        async def new_context(self, **options):
+            context = FakeContext()
+            context.options.append(options)
+            state["contexts"].append(context)
+            return context
+
+        async def close(self):
+            if not self.closed:
+                state["browser_closes"] += 1
+                self.closed = True
+
+    class FakePlaywright:
+        async def stop(self):
+            state["playwright_stops"] += 1
+
+    class FakeProcess:
+        returncode = None
+
+        def kill(self):
+            state["forced_kills"] += 1
+            self.returncode = -9
+
+    class FakeManager:
+        def __init__(self):
+            self._connection = SimpleNamespace(
+                _transport=SimpleNamespace(_proc=FakeProcess())
+            )
+
+    async def start_browser(session):
+        state["launches"] += 1
+        session.playwright_manager = FakeManager()
+        session.playwright = FakePlaywright()
+        session.browser = FakeBrowser()
+
+    monkeypatch.setattr(pdf_service, "_start_browser", start_browser)
+    return state
+
+
 def make_pdf(page_count: int) -> bytes:
     writer = PdfWriter()
     for _ in range(page_count):
@@ -325,45 +406,7 @@ def test_render_request_route_continues_or_aborts(monkeypatch, allowed):
 
 
 def test_render_pdf_disables_javascript_and_installs_request_route(monkeypatch):
-    class FakePage:
-        async def set_content(self, html, wait_until):
-            return None
-
-        async def goto(self, url, wait_until):
-            return None
-
-        async def pdf(self, **options):
-            return b"pdf"
-
-    class FakeContext:
-        def __init__(self):
-            self.options = []
-            self.route_pattern = None
-            self.route_handler = None
-
-        def set_default_timeout(self, timeout):
-            self.timeout = timeout
-
-        async def route(self, pattern, handler):
-            self.route_pattern = pattern
-            self.route_handler = handler
-
-        async def new_page(self):
-            return FakePage()
-
-        async def close(self):
-            return None
-
-    class FakeBrowser:
-        def __init__(self, context):
-            self.context = context
-
-        async def new_context(self, **options):
-            self.context.options.append(options)
-            return self.context
-
-    context = FakeContext()
-    monkeypatch.setattr(pdf_service, "get_browser", AsyncMock(return_value=FakeBrowser(context)))
+    state = install_fake_renderer(monkeypatch)
 
     async def render_both():
         email_pdf = await pdf_service.render_pdf("<p>safe content</p>")
@@ -371,9 +414,43 @@ def test_render_pdf_disables_javascript_and_installs_request_route(monkeypatch):
         return email_pdf, url_pdf
 
     assert asyncio.run(render_both()) == (b"pdf", b"pdf")
-    assert [options["java_script_enabled"] for options in context.options] == [False, False]
-    assert context.route_pattern == "**/*"
-    assert context.route_handler is not None
+    assert [
+        context.options[0]["java_script_enabled"]
+        for context in state["contexts"]
+    ] == [False, False]
+    assert state["contexts"][0].route_pattern == "**/*"
+    assert state["contexts"][0].route_handler is not None
+
+
+def test_render_pdf_uses_a_fresh_browser_for_each_document(monkeypatch):
+    state = install_fake_renderer(monkeypatch)
+
+    async def render_documents():
+        return [
+            await pdf_service.render_pdf(f"<p>document {index}</p>")
+            for index in range(3)
+        ]
+
+    assert asyncio.run(render_documents()) == [b"pdf", b"pdf", b"pdf"]
+    assert state["launches"] == 3
+    assert state["browser_closes"] == 3
+    assert state["playwright_stops"] == 3
+
+
+def test_render_timeout_retries_and_following_render_succeeds(monkeypatch):
+    state = install_fake_renderer(monkeypatch, hang_attempts=2)
+    monkeypatch.setattr(pdf_service, "_render_timeout_seconds", lambda: 0.75)
+
+    async def render_after_timeout():
+        with pytest.raises(RuntimeError, match="PDF rendering failed"):
+            await pdf_service.render_pdf("<p>hang</p>")
+        return await pdf_service.render_pdf("<p>works</p>")
+
+    assert asyncio.run(render_after_timeout()) == b"pdf"
+    assert state["launches"] == 3
+    assert state["forced_kills"] == 2
+    assert state["browser_closes"] == 3
+    assert state["playwright_stops"] == 3
 
 
 def test_text_to_html_escapes_markup_and_converts_newlines():

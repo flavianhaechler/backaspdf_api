@@ -8,3 +8,4 @@
 - Delivery failures counted as completed
 - Versionen in requirements.txt festschreiben, damit ein Neubau nicht unbemerkt neuere Bibliotheken zieht.
 - Integrationstest für Datenbankabfragen gegen echtes Postgres
+- Aufträge, die im Status processing stecken bleiben, beim Worker-Start erkennen und als failed abschliessen oder neu einreihen.

@@ -139,7 +139,7 @@ async def resend_webhook(request: Request):
         job_type = "split"
     else:
         job_type = "render"
-    logger.info(f"Job type: {job_type} (to: {to_field})")
+    logger.info("Inbound job type=%s", job_type)
     
     if not from_email or not message_id:
         logger.warning("Missing from_email or message_id")
@@ -148,7 +148,7 @@ async def resend_webhook(request: Request):
     # Fetch full email content from Resend API
     email_fetched = False
     if email_id:
-        logger.info(f"Fetching email content for {email_id}")
+        logger.info("Fetching email content from Resend")
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -184,7 +184,7 @@ async def resend_webhook(request: Request):
 
     # Create job
     job_id = await db.create_job(message_id=message_id, from_email=from_email, subject=subject, payload=data, job_type=job_type)
-    logger.info(f"Job created: {job_id} for {from_email}")
+    logger.info("Job created: %s type=%s", job_id, job_type)
     
     return {"status": "queued", "job_id": job_id}
 
@@ -201,7 +201,7 @@ async def stripe_webhook(request: Request):
     try:
         event = stripe.construct_webhook_event(payload, signature)
     except Exception as e:
-        logger.error(f"Stripe webhook verification failed: {e}")
+        logger.error("Stripe webhook verification failed (%s)", type(e).__name__)
         raise HTTPException(400, "Invalid signature")
     
     event_type = event["type"]
@@ -224,7 +224,7 @@ async def _handle_checkout_completed(session: dict):
     email = session.get("customer_email") or session.get("metadata", {}).get("email")
     
     if not email:
-        logger.error("No email in checkout session")
+        logger.error("Checkout event has no sender")
         return
     
     sender = await db.get_sender(email)
@@ -233,7 +233,7 @@ async def _handle_checkout_completed(session: dict):
     
     await db.update_sender_stripe(email, customer_id, subscription_id)
     await db.update_sender_plan(email, "pro")
-    logger.info(f"Checkout completed: {email} upgraded to pro")
+    logger.info("Checkout completed; billing record updated")
 
 
 async def _handle_subscription_updated(subscription: dict):
@@ -248,7 +248,7 @@ async def _handle_subscription_updated(subscription: dict):
         await db.update_sender_plan(sender["email"], "pro")
     else:
         await db.update_sender_plan(sender["email"], "free")
-    logger.info(f"Subscription updated: {sender['email']} status={status}")
+    logger.info("Subscription updated (status=%s)", status)
 
 
 async def _handle_subscription_deleted(subscription: dict):
@@ -257,7 +257,7 @@ async def _handle_subscription_deleted(subscription: dict):
     if not sender:
         return
     await db.update_sender_plan(sender["email"], "free")
-    logger.info(f"Subscription deleted: {sender['email']} downgraded to free")
+    logger.info("Subscription deleted")
 
 
 # --- Rate limiter for /contact (in-memory, per-process) ---
@@ -325,7 +325,7 @@ async def create_checkout(req: CheckoutRequest):
         url = await stripe.create_checkout_session(req.email)
         return {"url": url}
     except Exception as e:
-        logger.error(f"Checkout error: {e}")
+        logger.error("Checkout failed (%s)", type(e).__name__)
         raise HTTPException(500, "Failed to create checkout session")
 
 
@@ -362,5 +362,5 @@ async def portal_redirect(token: str):
         portal_url = await stripe.create_portal_session(sender["stripe_customer_id"])
         return Response(status_code=302, headers={"Location": portal_url})
     except Exception as e:
-        logger.error(f"Portal redirect error: {e}")
+        logger.error("Portal redirect failed (%s)", type(e).__name__)
         raise HTTPException(500, "Failed to access billing portal")

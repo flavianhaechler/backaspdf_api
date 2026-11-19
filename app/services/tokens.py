@@ -75,8 +75,8 @@ def verify_portal_token(token: str) -> dict:
         
         return payload
         
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        logger.warning(f"Token decode error: {e}")
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        logger.warning("Token decode failed")
         raise ValueError("Invalid token")
 
 

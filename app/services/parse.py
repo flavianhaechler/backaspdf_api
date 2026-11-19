@@ -5,7 +5,6 @@ import base64
 from html import escape
 import logging
 import re
-import json
 from dataclasses import dataclass
 from typing import Optional
 from email.utils import parseaddr
@@ -36,9 +35,6 @@ def parse_email(webhook_data: dict) -> ParsedEmail:
     Extracts HTML content, resolves inline images (CID),
     and normalizes the email for PDF rendering.
     """
-    # DEBUG: Log full payload
-    logger.info(f"FULL PAYLOAD: {json.dumps(webhook_data, default=str)[:3000]}")
-    
     # Extract basic fields
     from_field = webhook_data.get("from", "")
     from_name, from_email = parseaddr(from_field)
@@ -148,11 +144,10 @@ async def extract_pdf_attachments(email_id: str) -> list[bytes]:
             headers=headers,
         )
         if response.status_code != 200:
-            logger.error(f"Failed to fetch attachments: {response.status_code} - {response.text}")
+            logger.error("Failed to fetch attachments (status=%s)", response.status_code)
             return pdfs
 
         raw = response.json()
-        logger.info(f"Attachments raw response: {str(raw)[:500]}")
 
         # Handle Resend wrapping response in {"data": [...]}
         if isinstance(raw, dict):
@@ -160,33 +155,32 @@ async def extract_pdf_attachments(email_id: str) -> list[bytes]:
         else:
             attachments = raw
 
-        logger.info(f"Found {len(attachments)} attachments for email {email_id}")
+        logger.info("Found %s attachments", len(attachments))
 
         for att in attachments:
             if isinstance(att, str):
-                logger.warning(f"Attachment is string, skipping: {att[:100]}")
+                logger.warning("Skipping malformed attachment metadata")
                 continue
 
             content_type = att.get("content_type", att.get("contentType", ""))
             filename = att.get("filename", "")
             download_url = att.get("download_url", att.get("downloadUrl", ""))
-            logger.info(f"Processing: {filename}, type={content_type}")
 
             if content_type != "application/pdf" and not filename.lower().endswith(".pdf"):
-                logger.info(f"Skipping non-PDF attachment: {filename} ({content_type})")
+                logger.info("Skipping non-PDF attachment")
                 continue
 
             if not download_url:
-                logger.warning(f"No download URL for attachment: {filename}")
+                logger.warning("PDF attachment has no download URL")
                 continue
 
             # Download the PDF
             dl_response = await client.get(download_url)
             if dl_response.status_code == 200:
                 pdfs.append(dl_response.content)
-                logger.info(f"Downloaded PDF: {filename} ({len(dl_response.content)} bytes)")
+                logger.info("Downloaded PDF attachment (%s bytes)", len(dl_response.content))
             else:
-                logger.error(f"Failed to download {filename}: {dl_response.status_code}")
+                logger.error("Failed to download PDF attachment (status=%s)", dl_response.status_code)
 
     return pdfs
 

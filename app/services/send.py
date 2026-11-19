@@ -242,13 +242,13 @@ async def _send_email(payload: dict) -> bool:
             )
             
             if response.status_code == 200:
-                data = response.json()
-                logger.info(f"Email sent: {data.get('id')} to {payload['to']}")
+                response.json()
+                logger.info("Email sent (status=%s)", response.status_code)
                 return True
             else:
-                logger.error(f"Resend error: {response.status_code} - {response.text}")
+                logger.error("Resend email send failed (status=%s)", response.status_code)
                 return False
                 
     except Exception as e:
-        logger.error(f"Email send error: {e}")
+        logger.error("Email send failed (%s)", type(e).__name__)
         return False

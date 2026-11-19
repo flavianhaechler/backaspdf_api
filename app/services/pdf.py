@@ -189,11 +189,11 @@ async def render_pdf(
         _browser = None
         
         if _retry:
-            logger.warning(f"Browser error, retrying: {e}")
+            logger.warning("Browser error, retrying (%s)", type(e).__name__)
             return await render_pdf(html, options, _retry=False)
         
-        logger.error(f"PDF render error: {e}")
-        raise RuntimeError(f"PDF rendering failed: {e}")
+        logger.error("PDF render failed (%s)", type(e).__name__)
+        raise RuntimeError("PDF rendering failed") from e
 
 
 async def render_url_to_pdf(
@@ -249,7 +249,7 @@ async def render_url_to_pdf(
             scale=options.scale,
         )
         
-        logger.info(f"URL PDF rendered: {len(pdf_bytes)} bytes from {url}")
+        logger.info("URL PDF rendered: %s bytes", len(pdf_bytes))
         return pdf_bytes
         
     finally:

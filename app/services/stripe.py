@@ -37,11 +37,11 @@ async def create_checkout_session(email: str) -> str:
             },
         )
         
-        logger.info(f"Checkout session created for {email}: {session.id}")
+        logger.info("Stripe checkout session created")
         return session.url
         
     except stripe.error.StripeError as e:
-        logger.error(f"Stripe checkout error: {e}")
+        logger.error("Stripe checkout failed (%s)", type(e).__name__)
         raise
 
 
@@ -60,11 +60,11 @@ async def create_portal_session(customer_id: str, return_url: str = None) -> str
             return_url=return_url,
         )
         
-        logger.info(f"Portal session created for customer {customer_id}")
+        logger.info("Stripe portal session created")
         return session.url
         
     except stripe.error.StripeError as e:
-        logger.error(f"Stripe portal error: {e}")
+        logger.error("Stripe portal creation failed (%s)", type(e).__name__)
         raise
 
 
@@ -81,7 +81,7 @@ async def get_customer_by_email(email: str) -> Optional[str]:
         return None
         
     except stripe.error.StripeError as e:
-        logger.error(f"Stripe customer lookup error: {e}")
+        logger.error("Stripe customer lookup failed (%s)", type(e).__name__)
         return None
 
 
@@ -103,7 +103,7 @@ async def get_subscription_status(customer_id: str) -> Optional[str]:
         return None
         
     except stripe.error.StripeError as e:
-        logger.error(f"Stripe subscription lookup error: {e}")
+        logger.error("Stripe subscription lookup failed (%s)", type(e).__name__)
         return None
 
 

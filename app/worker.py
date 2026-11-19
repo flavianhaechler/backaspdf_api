@@ -66,14 +66,14 @@ async def process_job(job: dict) -> bool:
     if isinstance(payload, str):
         payload = json.loads(payload)
 
-    logger.info(f"Processing job {job_id} type={job_type} from {from_email}")
+    logger.info("Processing job %s type=%s", job_id, job_type)
 
     # Check if rejected at queue time
     if payload.get("rejected"):
         reason = payload.get("reason", "Quota exceeded")
         await send_rejection_email(from_email, reason)
         await db.update_job_status(job_id, "rejected", "quota_exceeded")
-        logger.info(f"Job {job_id} rejected: {reason}")
+        logger.info("Job %s rejected", job_id)
         return True
 
     try:
@@ -91,15 +91,15 @@ async def process_job(job: dict) -> bool:
         return True
 
     except Exception as e:
-        logger.error(f"Job {job_id} failed: {e}")
-        await db.update_job_status(job_id, "failed", str(e)[:50])
+        error_code = type(e).__name__[:50]
+        logger.error("Job %s failed (%s)", job_id, error_code)
+        await db.update_job_status(job_id, "failed", error_code)
         return False
 
 
 async def _process_render(job_id: str, from_email: str, payload: dict):
     """Process a render job: HTML email -> PDF."""
     parsed = parse_email(payload)
-    logger.info(f"Parsed email: subject='{parsed.subject}'")
 
     pdf_bytes = await render_pdf(parsed.html)
     logger.info(f"PDF rendered: {len(pdf_bytes)} bytes")
@@ -244,7 +244,7 @@ async def worker_loop():
                 await process_job(job)
                 
         except Exception as e:
-            logger.error(f"Worker loop error: {e}")
+            logger.error("Worker loop error (%s)", type(e).__name__)
             await asyncio.sleep(5)  # Back off on error
     
     logger.info("Worker stopped")

@@ -1,5 +1,6 @@
 import asyncio
 import base64
+from contextlib import asynccontextmanager
 import hashlib
 import hmac
 import json
@@ -15,9 +16,9 @@ from fastapi.testclient import TestClient
 from pypdf import PdfReader, PdfWriter
 import pytest
 
-from app import main, worker
+from app import db, main, worker
 from app.services import pdf as pdf_service
-from app.services.parse import normalize_html, parse_email, text_to_html
+from app.services.parse import extract_pdf_attachments, normalize_html, parse_email, text_to_html
 from app.services.pdf import close_browser, render_pdf
 from app.services.pdf_tools import merge_pdfs, split_pdf
 from app.services import quota
@@ -105,6 +106,92 @@ def test_parse_email_preserves_mail_fields_and_fixture_content():
         assert expected_content in parsed.html
         assert parsed.text == "fallback text"
         assert parsed.has_attachments is False
+
+
+def test_parse_email_does_not_log_mail_content_or_subject(caplog):
+    markers = ("private subject marker", "private html marker", "private text marker")
+    payload = {
+        "messageId": "private-message-id",
+        "from": "private-sender@example.test",
+        "subject": markers[0],
+        "html": f"<p>{markers[1]}</p>",
+        "text": markers[2],
+        "attachments": [],
+    }
+
+    with caplog.at_level(logging.INFO, logger="app.services.parse"):
+        parse_email(payload)
+
+    assert all(marker not in caplog.text for marker in markers)
+
+
+def test_attachment_download_logs_do_not_include_raw_response_or_filename(monkeypatch, caplog):
+    response_marker = "private-attachment-response"
+    filename_marker = "private-attachment-name.pdf"
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+        content = b"pdf-bytes"
+
+        def json(self):
+            return {"data": [{
+                "filename": filename_marker,
+                "content_type": "application/pdf",
+                "download_url": "https://files.example.test/private.pdf",
+                "metadata": response_marker,
+            }]}
+
+    class FakeAsyncClient:
+        def __init__(self, timeout=None):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_value, traceback):
+            return False
+
+        async def get(self, url, headers=None):
+            return FakeResponse()
+
+    monkeypatch.setattr("app.services.parse.httpx.AsyncClient", FakeAsyncClient)
+
+    with caplog.at_level(logging.INFO, logger="app.services.parse"):
+        pdfs = asyncio.run(extract_pdf_attachments("private-email-id"))
+
+    assert pdfs == [b"pdf-bytes"]
+    assert response_marker not in caplog.text
+    assert filename_marker not in caplog.text
+    assert "private-email-id" not in caplog.text
+
+
+def test_attachment_api_error_does_not_log_raw_response(monkeypatch, caplog):
+    response_marker = "private-api-response-body"
+
+    class FakeResponse:
+        status_code = 503
+        text = response_marker
+
+    class FakeAsyncClient:
+        def __init__(self, timeout=None):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_value, traceback):
+            return False
+
+        async def get(self, url, headers=None):
+            return FakeResponse()
+
+    monkeypatch.setattr("app.services.parse.httpx.AsyncClient", FakeAsyncClient)
+
+    with caplog.at_level(logging.ERROR, logger="app.services.parse"):
+        assert asyncio.run(extract_pdf_attachments("private-email-id")) == []
+
+    assert response_marker not in caplog.text
 
 
 def test_fixture_pdfs_match_pre_hardening_pages_and_extracted_text():
@@ -296,6 +383,70 @@ def test_text_to_html_escapes_markup_and_converts_newlines():
     assert "<body style=\"font-family: monospace; white-space: pre-wrap; padding: 20px;\">" in result
 
 
+def test_email_send_error_does_not_log_recipient_body_or_response(monkeypatch, caplog):
+    markers = ("private-recipient@example.test", "private subject", "private email body", "private API response")
+
+    class FakeResponse:
+        status_code = 503
+        text = markers[3]
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_value, traceback):
+            return False
+
+        async def post(self, url, headers, json, timeout):
+            return FakeResponse()
+
+    monkeypatch.setattr(send.httpx, "AsyncClient", FakeAsyncClient)
+
+    with caplog.at_level(logging.ERROR, logger="app.services.send"):
+        result = asyncio.run(send._send_email({
+            "to": [markers[0]],
+            "subject": markers[1],
+            "html": markers[2],
+        }))
+
+    assert result is False
+    assert all(marker not in caplog.text for marker in markers)
+
+
+def test_successful_email_send_does_not_log_recipient_or_api_response(monkeypatch, caplog):
+    markers = ("private-recipient@example.test", "private-api-response-id")
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        @staticmethod
+        def json():
+            return {"id": markers[1]}
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_value, traceback):
+            return False
+
+        async def post(self, url, headers, json, timeout):
+            return FakeResponse()
+
+    monkeypatch.setattr(send.httpx, "AsyncClient", FakeAsyncClient)
+
+    with caplog.at_level(logging.INFO, logger="app.services.send"):
+        result = asyncio.run(send._send_email({
+            "to": [markers[0]],
+            "subject": "private subject",
+            "html": "private body",
+        }))
+
+    assert result is True
+    assert all(marker not in caplog.text for marker in markers)
+
+
 def test_generate_filename_uses_date_and_existing_format(monkeypatch):
     class FixedDate(datetime):
         @classmethod
@@ -322,6 +473,103 @@ def test_split_pdf_returns_one_pdf_per_page():
 
     assert [filename for filename, _ in pages] == ["page_1.pdf", "page_2.pdf", "page_3.pdf"]
     assert [len(PdfReader(BytesIO(page)).pages) for _, page in pages] == [1, 1, 1]
+
+
+@pytest.mark.parametrize("status", ["completed", "failed", "rejected", "processing"])
+def test_update_job_status_clears_payload_only_for_terminal_statuses(monkeypatch, status):
+    connection = SimpleNamespace(execute=AsyncMock())
+
+    @asynccontextmanager
+    async def fake_get_conn():
+        yield connection
+
+    monkeypatch.setattr(db, "get_conn", fake_get_conn)
+    asyncio.run(db.update_job_status("job-123", status, "safe-error"))
+
+    query, job_id, saved_status, error = connection.execute.await_args.args
+    normalized_query = " ".join(query.split())
+    assert "email_payload = CASE" in query
+    assert "THEN '{}'::jsonb ELSE email_payload END" in normalized_query
+    assert "('completed', 'failed', 'rejected')" in query
+    assert (job_id, saved_status, error) == ("job-123", status, "safe-error")
+
+
+def test_job_deduplication_still_uses_message_id(monkeypatch):
+    connection = SimpleNamespace(fetchrow=AsyncMock(return_value={"exists": 1}))
+
+    @asynccontextmanager
+    async def fake_get_conn():
+        yield connection
+
+    monkeypatch.setattr(db, "get_conn", fake_get_conn)
+
+    assert asyncio.run(db.job_exists("stable-message-id"))
+    query, message_id = connection.fetchrow.await_args.args
+    assert "WHERE message_id = $1" in query
+    assert message_id == "stable-message-id"
+
+
+def test_worker_logs_do_not_include_sender_subject_or_content(monkeypatch, caplog):
+    markers = ("private-sender@example.test", "private subject", "private body")
+    monkeypatch.setattr(worker.db, "update_job_status", AsyncMock())
+    monkeypatch.setattr(worker, "_process_render", AsyncMock())
+
+    with caplog.at_level(logging.INFO, logger="app.worker"):
+        result = asyncio.run(worker.process_job({
+            "id": "job-privacy-123",
+            "from_email": markers[0],
+            "job_type": "render",
+            "email_payload": {"subject": markers[1], "html": markers[2]},
+        }))
+
+    assert result is True
+    assert "job-privacy-123" in caplog.text
+    assert all(marker not in caplog.text for marker in markers)
+
+
+def test_worker_failure_logs_and_stores_only_exception_type(monkeypatch, caplog):
+    private_error = "private body leaked by renderer"
+    update_status = AsyncMock()
+    monkeypatch.setattr(worker.db, "update_job_status", update_status)
+    monkeypatch.setattr(
+        worker,
+        "_process_render",
+        AsyncMock(side_effect=RuntimeError(private_error)),
+    )
+
+    with caplog.at_level(logging.ERROR, logger="app.worker"):
+        result = asyncio.run(worker.process_job({
+            "id": "job-failed-123",
+            "from_email": "sender@example.test",
+            "job_type": "render",
+            "email_payload": {},
+        }))
+
+    assert result is False
+    assert private_error not in caplog.text
+    assert update_status.await_args_list[-1].args == ("job-failed-123", "failed", "RuntimeError")
+
+
+def test_terminal_payload_cleanup_dry_run_counts_without_update(monkeypatch):
+    from scripts import cleanup_terminal_email_payloads
+
+    connection = SimpleNamespace(
+        fetchval=AsyncMock(return_value=3),
+        execute=AsyncMock(),
+        close=AsyncMock(),
+    )
+    monkeypatch.setattr(
+        cleanup_terminal_email_payloads.asyncpg,
+        "connect",
+        AsyncMock(return_value=connection),
+    )
+
+    result = asyncio.run(cleanup_terminal_email_payloads.run_cleanup(execute=False))
+
+    assert result == 3
+    connection.fetchval.assert_awaited_once()
+    connection.execute.assert_not_awaited()
+    connection.close.assert_awaited_once()
 
 
 def configure_quota(monkeypatch, plan, used, warned_upgrade=False, warned_fair_use=False):
@@ -399,7 +647,7 @@ def test_limit_notice_and_rejection_emails_have_fair_use_only_copy(monkeypatch):
     assert "/subscribe" not in rejection["html"]
 
 
-def test_resend_webhook_fetches_api_content_and_queues_job(monkeypatch):
+def test_resend_webhook_fetches_api_content_and_queues_job(monkeypatch, caplog):
     db = main.db
     monkeypatch.setattr(main.settings, "resend_webhook_secret", WEBHOOK_SECRET)
     monkeypatch.setattr(main.settings, "environment", "production")
@@ -445,11 +693,12 @@ def test_resend_webhook_fetches_api_content_and_queues_job(monkeypatch):
         }
     }
     body = json.dumps(payload, separators=(",", ":")).encode()
-    response = TestClient(main.app).post(
-        "/webhooks/resend",
-        content=body,
-        headers=signed_headers(body),
-    )
+    with caplog.at_level(logging.INFO, logger="app.main"):
+        response = TestClient(main.app).post(
+            "/webhooks/resend",
+            content=body,
+            headers=signed_headers(body),
+        )
 
     assert response.status_code == 200
     assert response.json() == {"status": "queued", "job_id": "job-123"}
@@ -462,6 +711,10 @@ def test_resend_webhook_fetches_api_content_and_queues_job(monkeypatch):
     assert job["payload"]["html"] == "<p>API content</p>"
     assert job["payload"]["text"] == "API text"
     assert "Webhook content must not win" not in json.dumps(job["payload"])
+    assert "alex@example.test" not in caplog.text
+    assert "Original subject" not in caplog.text
+    assert "Webhook content must not win" not in caplog.text
+    assert "API content" not in caplog.text
 
 
 def test_resend_webhook_rejects_missing_or_invalid_signature_without_creating_job(monkeypatch):

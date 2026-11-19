@@ -6,3 +6,4 @@
 - Date and original sender in the header
 - Filename with merchant and amount
 - Delivery failures counted as completed
+- Versionen in requirements.txt festschreiben, damit ein Neubau nicht unbemerkt neuere Bibliotheken zieht.

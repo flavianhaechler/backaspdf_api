@@ -157,6 +157,7 @@ async def _process_merge(job_id: str, from_email: str, payload: dict):
     filename = generate_filename(subject=subject)
 
     await record_usage(from_email)
+    quota_result = await check_quota(from_email)
 
     await send_pdf_reply(
         to_email=from_email,
@@ -164,6 +165,9 @@ async def _process_merge(job_id: str, from_email: str, payload: dict):
         pdf_bytes=merged,
         pdf_filename=filename,
     )
+
+    if quota_result.action.value == "allow_warn_upgrade":
+        await send_upgrade_email(from_email, quota_result.used, quota_result.limit)
 
 
 async def _process_split(job_id: str, from_email: str, payload: dict):
@@ -182,12 +186,16 @@ async def _process_split(job_id: str, from_email: str, payload: dict):
     pages = split_pdf(pdfs[0])
 
     await record_usage(from_email)
+    quota_result = await check_quota(from_email)
 
     await send_pdf_reply_multi(
         to_email=from_email,
         subject=subject,
         attachments=pages,
     )
+
+    if quota_result.action.value == "allow_warn_upgrade":
+        await send_upgrade_email(from_email, quota_result.used, quota_result.limit)
 
 
 def generate_filename(

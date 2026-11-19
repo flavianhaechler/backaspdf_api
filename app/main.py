@@ -21,6 +21,7 @@ from app.services import (
     tokens,
     check_quota,
     send_contact_email,
+    send_upgrade_email,
 )
 from app.services.pdf import close_browser
 
@@ -181,6 +182,8 @@ async def resend_webhook(request: Request):
     if quota_result.action.value == "reject":
         await db.create_job(message_id=message_id, from_email=from_email, subject=subject, payload={"rejected": True, "reason": quota_result.message}, job_type=job_type)
         return {"status": "rejected"}
+    if quota_result.action.value == "allow_warn_upgrade":
+        await send_upgrade_email(from_email, quota_result.used, quota_result.limit)
 
     # Create job
     job_id = await db.create_job(message_id=message_id, from_email=from_email, subject=subject, payload=data, job_type=job_type)

@@ -550,6 +550,56 @@ def test_worker_failure_logs_and_stores_only_exception_type(monkeypatch, caplog)
     assert update_status.await_args_list[-1].args == ("job-failed-123", "failed", "RuntimeError")
 
 
+def test_merge_job_sends_monthly_notice_after_reaching_quota(monkeypatch):
+    quota_result = SimpleNamespace(
+        action=SimpleNamespace(value="allow_warn_upgrade"),
+        used=10,
+        limit=10,
+    )
+    check_quota = AsyncMock(return_value=quota_result)
+    notice = AsyncMock(return_value=True)
+    monkeypatch.setattr(worker, "extract_pdf_attachments", AsyncMock(return_value=[b"first", b"second"]))
+    monkeypatch.setattr(worker, "merge_pdfs", MagicMock(return_value=b"merged"))
+    monkeypatch.setattr(worker, "record_usage", AsyncMock(return_value=10))
+    monkeypatch.setattr(worker, "check_quota", check_quota)
+    monkeypatch.setattr(worker, "send_pdf_reply", AsyncMock(return_value=True))
+    monkeypatch.setattr(worker, "send_upgrade_email", notice)
+
+    asyncio.run(worker._process_merge(
+        "job-merge-123",
+        "sender@example.test",
+        {"email_id": "email-merge", "subject": "Merged"},
+    ))
+
+    check_quota.assert_awaited_once_with("sender@example.test")
+    notice.assert_awaited_once_with("sender@example.test", 10, 10)
+
+
+def test_split_job_sends_monthly_notice_after_reaching_quota(monkeypatch):
+    quota_result = SimpleNamespace(
+        action=SimpleNamespace(value="allow_warn_upgrade"),
+        used=10,
+        limit=10,
+    )
+    check_quota = AsyncMock(return_value=quota_result)
+    notice = AsyncMock(return_value=True)
+    monkeypatch.setattr(worker, "extract_pdf_attachments", AsyncMock(return_value=[b"source"]))
+    monkeypatch.setattr(worker, "split_pdf", MagicMock(return_value=[("page_1.pdf", b"page")]))
+    monkeypatch.setattr(worker, "record_usage", AsyncMock(return_value=10))
+    monkeypatch.setattr(worker, "check_quota", check_quota)
+    monkeypatch.setattr(worker, "send_pdf_reply_multi", AsyncMock(return_value=True))
+    monkeypatch.setattr(worker, "send_upgrade_email", notice)
+
+    asyncio.run(worker._process_split(
+        "job-split-123",
+        "sender@example.test",
+        {"email_id": "email-split", "subject": "Split"},
+    ))
+
+    check_quota.assert_awaited_once_with("sender@example.test")
+    notice.assert_awaited_once_with("sender@example.test", 10, 10)
+
+
 def test_terminal_payload_cleanup_dry_run_counts_without_update(monkeypatch):
     from scripts import cleanup_terminal_email_payloads
 
@@ -863,6 +913,55 @@ def test_resend_api_failure_does_not_create_job(monkeypatch):
 
     assert response.status_code == 502
     create_job.assert_not_awaited()
+
+
+def test_resend_webhook_sends_warning_for_allow_warn_quota_result(monkeypatch):
+    monkeypatch.setattr(main.settings, "resend_webhook_secret", WEBHOOK_SECRET)
+    monkeypatch.setattr(main.settings, "environment", "production")
+    monkeypatch.setattr(main.db, "job_exists", AsyncMock(return_value=False))
+    monkeypatch.setattr(main.db, "create_job", AsyncMock(return_value="job-warn-123"))
+    monkeypatch.setattr(main, "check_quota", AsyncMock(return_value=SimpleNamespace(
+        action=SimpleNamespace(value="allow_warn_upgrade"),
+        used=10,
+        limit=10,
+        message="",
+    )))
+    send_notice = AsyncMock(return_value=True)
+    monkeypatch.setattr(main, "send_upgrade_email", send_notice, raising=False)
+
+    class FakeResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"html": "<p>Body</p>", "text": "Body"}
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_value, traceback):
+            return False
+
+        async def get(self, url, headers):
+            return FakeResponse()
+
+    monkeypatch.setattr(main.httpx, "AsyncClient", FakeAsyncClient)
+    payload = {"data": {
+        "from": "sender@example.test",
+        "to": ["merge@backaspdf.com"],
+        "messageId": "message-warn-123",
+        "email_id": "email-warn-123",
+    }}
+    body = json.dumps(payload, separators=(",", ":")).encode()
+    response = TestClient(main.app).post(
+        "/webhooks/resend",
+        content=body,
+        headers=signed_headers(body),
+    )
+
+    assert response.status_code == 200
+    send_notice.assert_awaited_once_with("sender@example.test", 10, 10)
 
 
 def test_billing_is_disabled_by_default():

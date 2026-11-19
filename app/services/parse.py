@@ -2,6 +2,7 @@
 Email parsing - extract HTML and metadata from inbound emails.
 """
 import base64
+from html import escape
 import logging
 import re
 import json
@@ -207,13 +208,15 @@ def normalize_html(html: str, subject: str = None, from_email: str = None, from_
     header_html = ""
     if subject or from_email:
         from_display = from_name if from_name else from_email
+        escaped_subject = escape(subject or "(No Subject)")
+        escaped_from_display = escape(from_display or "Unknown")
         header_html = f"""
         <div style="border-bottom: 1px solid #e0e0e0; padding-bottom: 16px; margin-bottom: 20px;">
             <div style="font-size: 18px; font-weight: bold; color: #333; margin-bottom: 8px;">
-                {subject or '(No Subject)'}
+                {escaped_subject}
             </div>
             <div style="font-size: 14px; color: #666;">
-                From: {from_display or 'Unknown'}
+                From: {escaped_from_display}
             </div>
         </div>
         """

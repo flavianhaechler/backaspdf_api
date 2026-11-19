@@ -13,9 +13,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 from fastapi.testclient import TestClient
 from pypdf import PdfReader, PdfWriter
+import pytest
 
 from app import main, worker
+from app.services import pdf as pdf_service
 from app.services.parse import normalize_html, parse_email, text_to_html
+from app.services.pdf import close_browser, render_pdf
 from app.services.pdf_tools import merge_pdfs, split_pdf
 from app.services import quota
 from app.config import Settings
@@ -24,6 +27,30 @@ from app.services import send
 
 FIXTURES = Path(__file__).parent / "fixtures"
 WEBHOOK_SECRET = f"whsec_{base64.b64encode(b'test webhook secret').decode()}"
+PDF_BASELINES = {
+    "text_email.html": {
+        "pages": 1,
+        "text": (
+            "Appointment confirmed\nFrom: Alex Example\nHello,\n"
+            "Your appointment is confirmed for Tuesday at 10:30.\nThank you,\nAlex"
+        ),
+    },
+    "shop_confirmation.html": {
+        "pages": 1,
+        "text": (
+            "Order NW-2048\nFrom: Northwind Shop\n"
+            "Northwind Shop - Order confirmation\nOrder NW-2048 has been confirmed.\n"
+            "Item Quantity Price\nDesk lamp1 CHF 48.00\nNotebook2 CHF 12.00\nTotal: CHF 72.00"
+        ),
+    },
+    "external_image_email.html": {
+        "pages": 1,
+        "text": (
+            "Monthly update\nFrom: Example Studio\nMonthly update\n"
+            "Here is the latest update from Example Studio.\nExample Studio banner"
+        ),
+    },
+}
 
 
 def fixture_html(name: str) -> str:
@@ -80,6 +107,38 @@ def test_parse_email_preserves_mail_fields_and_fixture_content():
         assert parsed.has_attachments is False
 
 
+def test_fixture_pdfs_match_pre_hardening_pages_and_extracted_text():
+    cases = {
+        "text_email.html": ("Appointment confirmed", "Alex Example"),
+        "shop_confirmation.html": ("Order NW-2048", "Northwind Shop"),
+        "external_image_email.html": ("Monthly update", "Example Studio"),
+    }
+
+    async def render_fixtures():
+        results = {}
+        try:
+            for filename, (subject, from_name) in cases.items():
+                parsed = parse_email({
+                    "messageId": filename,
+                    "from": f"{from_name} <sender@example.test>",
+                    "subject": subject,
+                    "html": fixture_html(filename),
+                    "text": "",
+                    "attachments": [],
+                })
+                pdf = await render_pdf(parsed.html)
+                reader = PdfReader(BytesIO(pdf))
+                results[filename] = {
+                    "pages": len(reader.pages),
+                    "text": "\n".join(page.extract_text() or "" for page in reader.pages),
+                }
+            return results
+        finally:
+            await close_browser()
+
+    assert asyncio.run(render_fixtures()) == PDF_BASELINES
+
+
 def test_normalize_html_wraps_fragment_and_adds_mail_header():
     result = normalize_html("<p>Order is ready.</p>", "Order ready", "shop@example.test", "Shop")
 
@@ -88,6 +147,146 @@ def test_normalize_html_wraps_fragment_and_adds_mail_header():
     assert "Order ready" in result
     assert "From: Shop" in result
     assert "<p>Order is ready.</p>" in result
+
+
+def test_normalize_html_escapes_subject_and_sender_in_header():
+    subject = '<script>alert("mail")</script>'
+    from_name = '"><img src=x onerror="mail">'
+
+    result = normalize_html("<p>Body</p>", subject, "sender@example.test", from_name)
+
+    assert "&lt;script&gt;alert(&quot;mail&quot;)&lt;/script&gt;" in result
+    assert "&quot;&gt;&lt;img src=x onerror=&quot;mail&quot;&gt;" in result
+    assert subject not in result
+    assert from_name not in result
+
+
+@pytest.mark.parametrize(
+    ("url", "resource_type", "expected"),
+    [
+        ("data:image/png;base64,AA==", "image", True),
+        ("data:text/css,body%7Bcolor%3Ared%7D", "stylesheet", True),
+        ("http://93.184.216.34/image.png", "image", True),
+        ("https://93.184.216.34/style.css", "stylesheet", True),
+        ("https://93.184.216.34/font.woff2", "font", True),
+        ("https://93.184.216.34/app.js", "script", False),
+        ("https://93.184.216.34/page.html", "document", False),
+        ("ftp://93.184.216.34/image.png", "image", False),
+        ("file:///etc/passwd", "image", False),
+        ("http://127.0.0.1/image.png", "image", False),
+        ("http://10.1.2.3/image.png", "image", False),
+        ("http://172.16.0.1/image.png", "image", False),
+        ("http://192.168.1.1/image.png", "image", False),
+        ("http://169.254.169.254/latest/meta-data", "image", False),
+        ("http://100.64.0.1/image.png", "image", False),
+        ("http://[::1]/image.png", "image", False),
+        ("http://[fc00::1]/image.png", "image", False),
+        ("http://[fe80::1]/image.png", "image", False),
+        ("http://[::ffff:10.0.0.1]/image.png", "image", False),
+    ],
+)
+def test_render_request_allowlist_for_schemes_types_and_ip_literals(url, resource_type, expected):
+    assert asyncio.run(pdf_service._is_allowed_render_request(url, resource_type)) is expected
+
+
+def test_render_request_allowlist_rejects_dns_names_resolving_to_private_addresses(monkeypatch):
+    async def resolve_to_private(host, port):
+        return [(None, None, None, None, ("10.0.0.8", port))]
+
+    monkeypatch.setattr(pdf_service, "_resolve_host_addresses", resolve_to_private)
+
+    assert not asyncio.run(pdf_service._is_allowed_render_request(
+        "https://assets.example.test/image.png",
+        "image",
+    ))
+
+
+def test_render_request_allowlist_accepts_public_dns_names(monkeypatch):
+    async def resolve_to_public(host, port):
+        return [(None, None, None, None, ("93.184.216.34", port))]
+
+    monkeypatch.setattr(pdf_service, "_resolve_host_addresses", resolve_to_public)
+
+    assert asyncio.run(pdf_service._is_allowed_render_request(
+        "https://assets.example.test/image.png",
+        "image",
+    ))
+
+
+@pytest.mark.parametrize("allowed", [True, False])
+def test_render_request_route_continues_or_aborts(monkeypatch, allowed):
+    checker = AsyncMock(return_value=allowed)
+    monkeypatch.setattr(pdf_service, "_is_allowed_render_request", checker)
+
+    class FakeRequest:
+        url = "https://assets.example.test/image.png"
+        resource_type = "image"
+
+    class FakeRoute:
+        request = FakeRequest()
+
+        def __init__(self):
+            self.continue_ = AsyncMock()
+            self.abort = AsyncMock()
+
+    route = FakeRoute()
+    asyncio.run(pdf_service._route_render_request(route))
+
+    checker.assert_awaited_once_with(route.request.url, route.request.resource_type)
+    assert route.continue_.await_count == int(allowed)
+    assert route.abort.await_count == int(not allowed)
+
+
+def test_render_pdf_disables_javascript_and_installs_request_route(monkeypatch):
+    class FakePage:
+        async def set_content(self, html, wait_until):
+            return None
+
+        async def goto(self, url, wait_until):
+            return None
+
+        async def pdf(self, **options):
+            return b"pdf"
+
+    class FakeContext:
+        def __init__(self):
+            self.options = []
+            self.route_pattern = None
+            self.route_handler = None
+
+        def set_default_timeout(self, timeout):
+            self.timeout = timeout
+
+        async def route(self, pattern, handler):
+            self.route_pattern = pattern
+            self.route_handler = handler
+
+        async def new_page(self):
+            return FakePage()
+
+        async def close(self):
+            return None
+
+    class FakeBrowser:
+        def __init__(self, context):
+            self.context = context
+
+        async def new_context(self, **options):
+            self.context.options.append(options)
+            return self.context
+
+    context = FakeContext()
+    monkeypatch.setattr(pdf_service, "get_browser", AsyncMock(return_value=FakeBrowser(context)))
+
+    async def render_both():
+        email_pdf = await pdf_service.render_pdf("<p>safe content</p>")
+        url_pdf = await pdf_service.render_url_to_pdf("https://example.test/")
+        return email_pdf, url_pdf
+
+    assert asyncio.run(render_both()) == (b"pdf", b"pdf")
+    assert [options["java_script_enabled"] for options in context.options] == [False, False]
+    assert context.route_pattern == "**/*"
+    assert context.route_handler is not None
 
 
 def test_text_to_html_escapes_markup_and_converts_newlines():
